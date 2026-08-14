@@ -1,0 +1,53 @@
+{
+  "name": "oxo-flow-sarek",
+  "title": "nf-core/sarek (port) — WGS/WES germline and somatic variant calling",
+  "engine": "oxo-flow",
+  "source": {
+    "repo": "nf-core/sarek",
+    "url": "https://github.com/nf-core/sarek",
+    "tag": "3.10.0",
+    "sha": "8ccac7ad37b05dd792447763bf9671b719824587",
+    "license": "MIT"
+  },
+  "created": "2026-08-15",
+  "domain": "genomics",
+  "tags": ["wgs", "wes", "germline", "somatic", "variant-calling", "gatk", "bwa", "vep", "nf-core"],
+  "description": "oxo-flow port of nf-core/sarek 3.10.0 default main path: FastQC, fastp trim/split, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, CNN 1D scoring + tranche filtering (VCF_VARIANT_FILTERING_GATK), VEP annotation, VCF QC and MultiQC for WGS/WES germline and somatic variant calling.",
+  "scope": [
+    "fastqc", "fastp", "bwa_mem", "gatk_markduplicates", "mosdepth_md",
+    "samtools_stats_md", "gatk_baserecalibrator", "gatk_applybqsr",
+    "samtools_index_recal", "mosdepth_recal", "samtools_stats_recal",
+    "gatk_haplotypecaller", "gatk_cnnscorevariants", "gatk_filtervarianttranches",
+    "bcftools_stats", "vcftools_tstv_count",
+    "vcftools_tstv_qual", "vcftools_filter_summary", "ensemblvep_vep", "multiqc"
+  ],
+  "excluded": [
+    "NGSCheckMate (BAM_NGSCHECKMATE + BCFTOOLS_MPILEUP) — sample-identity QC, not on the ported default path",
+    "TrimGalore trimming (--trim_fastq_trimgalore alternative; fastp is the upstream default)",
+    "bwa-mem2 aligner (upstream default aligner is bwa-mem)",
+    "save_output_as_bam=true BAM branch of MarkDuplicates (CRAM-only port)",
+    "Strelka2, Mutect2, Manta, DeepVariant, CNVkit, ASCAT, MSIsensor, SomaticSniper, VarDict, FreeBayes, etc. — optional --tools callers, not on the default path",
+    "reference preparation (BWA_INDEX, GATK4_CREATESEQUENCEDICTIONARY, SAMTOOLS_FAIDX) — not ported; the port requires a pre-built reference bundle (upstream also accepts these as inputs via params.bwa/dict/fasta_fai)",
+    "interval preparation (gawk BUILD_INTERVALS, CREATE_INTERVALS_BED, TABIX bgzip/tabix interval split) and the per-interval scatter/gather of BQSR/ApplyBQSR/HaplotypeCaller (GATK4_GATHERBQSRREPORTS, CRAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS) — not ported; the port runs single whole-genome GATK jobs without --intervals (gathers are exact, so results are equivalent, but the per-contig parallelism of the upstream default path is absent)",
+    "joint_germline GVCF joint-genotyping subworkflow (default joint_germline=false)",
+    "UMI workflows (SAREK_UMI_*) — not on the default path",
+    "fastp split parts beyond 0001. — supported input size is capped at one split part (~50M read pairs / 200M lines per sample): only part 0001 is wired fastp -> BWA. Multi-part splits (any real WGS dataset above the threshold) are a known unsupported upstream behavior — upstream aligns every part and merges the BAMs before MarkDuplicates (BAM_MERGE_INDEX_SAMTOOLS)"
+  ],
+  "rule_count": 20,
+  "tools": [
+    "fastqc@0.12.1",
+    "fastp@1.1.0",
+    "bwa@0.7.19",
+    "samtools@1.24",
+    "gatk@4.6.2.0",
+    "mosdepth@0.3.14",
+    "bcftools@1.23.1",
+    "vcftools@0.1.17",
+    "ensembl-vep@116.0",
+    "multiqc@1.35"
+  ],
+  "status": "ready",
+  "repo_url": "https://github.com/oxo-flow-community/oxo-flow-sarek",
+  "site_page": "https://oxo-flow-community.github.io/oxo-flow-sarek/",
+  "upstream_license": "MIT"
+}

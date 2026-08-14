@@ -1,0 +1,622 @@
+# oxo-flow-sarek — WGS/WES germline and somatic variant calling
+# oxo-flow port of nf-core/sarek @ 3.10.0 (default-parameters main execution path).
+#
+# Ported 2026-08-15. See README.md fidelity table for the exact upstream
+# mapping and every deviation. Upstream default path reproduced here:
+#   FASTQC -> FASTP -> BWA_MEM -> GATK4_MARKDUPLICATES -> (mosdepth + samtools stats)
+#   -> GATK4_BASERECALIBRATOR -> GATK4_APPLYBQSR -> (index + mosdepth + samtools stats)
+#   -> GATK4_HAPLOTYPECALLER -> GATK4_CNNSCOREVARIANTS -> GATK4_FILTERVARIANTTRANCHES
+#   -> (bcftools stats + vcftools x3) -> ENSEMBLVEP_VEP -> MULTIQC
+
+[workflow]
+name = "oxo-flow-sarek"
+version = "1.0.0"
+description = "WGS/WES germline and somatic variant calling — oxo-flow port of nf-core/sarek 3.10.0: QC, trimming/splitting, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, VEP annotation, MultiQC"
+author = "oxo-flow-community"
+
+# Upstream nextflow.config params that drive the default path. Every value is
+# the upstream default (nf-core/sarek 3.10.0); `tools` is expressed as
+# per-tool booleans below (upstream: params.tools = "haplotypecaller,vep").
+[config]
+out_dir = "results"
+genome = "GRCh38"
+aligner = "bwa-mem"
+trim_fastq = false
+split_fastq = 50000000          # fastp --split_by_lines = split_fastq * 4
+length_required = 15
+wes = false
+save_output_as_bam = false      # CRAM output mode (upstream default)
+joint_germline = false
+gatk_pcr_indel_model = "CONSERVATIVE"
+seq_platform = "ILLUMINA"
+vep_genome = "GRCh38"
+vep_species = "homo_sapiens"
+vep_cache_version = 116
+
+# Sample metadata — mirrors tests/csv/3.0/fastq_single.csv (single-lane model:
+# nf-core/sarek meta.id = "{sample}-{lane}", read-group ID = "{sample}.{lane}")
+patient = "test"
+sex = "XX"
+status = 0
+lane = "test_L1"
+
+# tools / skip_tools equivalents (upstream comma-list params expressed as booleans)
+call_haplotypecaller = true
+annotate_vep = true
+skip_fastqc = false
+skip_mosdepth = false
+skip_samtools = false
+skip_bcftools = false
+skip_vcftools = false
+skip_multiqc = false
+
+# Reference data (user-provided; GRCh38 GATK bundle layout from upstream
+# conf/igenomes.config, substituted at port time)
+fasta = "/data/references/GRCh38/Sequence/WholeGenomeFasta/Homo_sapiens_assembly38.fasta"
+fasta_fai = "/data/references/GRCh38/Sequence/WholeGenomeFasta/Homo_sapiens_assembly38.fasta.fai"
+dict = "/data/references/GRCh38/Sequence/WholeGenomeFasta/Homo_sapiens_assembly38.dict"
+bwa_index_dir = "/data/references/GRCh38/Sequence/BWAIndex/"
+dbsnp = "/data/references/GRCh38/Annotation/GATKBundle/dbsnp_146.hg38.vcf.gz"
+dbsnp_tbi = "/data/references/GRCh38/Annotation/GATKBundle/dbsnp_146.hg38.vcf.gz.tbi"
+known_indels = [
+  "/data/references/GRCh38/Annotation/GATKBundle/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz",
+  "/data/references/GRCh38/Annotation/GATKBundle/Homo_sapiens_assembly38.known_indels.vcf.gz",
+]
+known_indels_tbi = [
+  "/data/references/GRCh38/Annotation/GATKBundle/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz.tbi",
+  "/data/references/GRCh38/Annotation/GATKBundle/Homo_sapiens_assembly38.known_indels.vcf.gz.tbi",
+]
+
+[[sample_groups]]
+name = "cohort"
+samples = ["test"]
+
+# ---------------------------------------------------------------------------
+# FASTQC — nf-core/fastqc module (raw reads QC)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fastqc"
+input = ["raw/{sample}_R1.fastq.gz", "raw/{sample}_R2.fastq.gz"]
+output = [
+  "{config.out_dir}/reports/fastqc/{sample}-{config.lane}/{sample}-{config.lane}_1_fastqc.html",
+  "{config.out_dir}/reports/fastqc/{sample}-{config.lane}/{sample}-{config.lane}_1_fastqc.zip",
+  "{config.out_dir}/reports/fastqc/{sample}-{config.lane}/{sample}-{config.lane}_2_fastqc.html",
+  "{config.out_dir}/reports/fastqc/{sample}-{config.lane}/{sample}-{config.lane}_2_fastqc.zip",
+]
+description = "FastQC quality control on raw reads (nf-core FASTQC, ext.args '--quiet')"
+when = "!config.skip_fastqc"
+shell = """
+mkdir -p {config.out_dir}/reports/fastqc/{sample}-{config.lane}
+printf "%s %s\\n" raw/{sample}_R1.fastq.gz {sample}-{config.lane}_1.fastq.gz raw/{sample}_R2.fastq.gz {sample}-{config.lane}_2.fastq.gz | while read old_name new_name; do
+    [ -f "$new_name" ] || ln -s $old_name $new_name
+done
+fastqc --quiet --threads 4 --memory 1024 {sample}-{config.lane}_1.fastq.gz {sample}-{config.lane}_2.fastq.gz
+mv {sample}-{config.lane}_1_fastqc.html {sample}-{config.lane}_1_fastqc.zip {sample}-{config.lane}_2_fastqc.html {sample}-{config.lane}_2_fastqc.zip {config.out_dir}/reports/fastqc/{sample}-{config.lane}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "4G"
+
+[rules.environment]
+docker = "quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0"
+
+# ---------------------------------------------------------------------------
+# FASTP — nf-core/fastp module (trim/split; upstream runs when
+# params.trim_fastq || params.split_fastq > 0 || params.umi_location)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fastp"
+input = ["raw/{sample}_R1.fastq.gz", "raw/{sample}_R2.fastq.gz"]
+output = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.json",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.html",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.log",
+]
+description = "Read trimming and splitting (nf-core FASTP; --split_by_lines = 4 x split_fastq)"
+when = "config.trim_fastq || config.split_fastq > 0"
+shell = """
+[ ! -f  {sample}-{config.lane}_R1.fastq.gz ] && ln -sf raw/{sample}_R1.fastq.gz {sample}-{config.lane}_R1.fastq.gz
+[ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
+fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
+mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
+mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "4G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57"
+
+# ---------------------------------------------------------------------------
+# BWA_MEM — nf-core/bwa/mem module (aligner 'bwa-mem', upstream default;
+# split_fastq > 1 gives prefix "{meta.id}.{first-read-token}")
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_mem"
+input = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
+]
+output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-K 100000000 -Y -R <read_group>')"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
+for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
+INDEX=$(find -L ./ -name "*.amb" | sed 's/\\.amb$//')
+bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t 24 $INDEX {input[0]} {input[1]} | samtools sort --threads 24 -o {sample}.0001.bam -
+mv {sample}.0001.bam {config.out_dir}/preprocessing/mapped/{sample}/
+"""
+
+[rules.resources]
+threads = 24
+memory = "30G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/bwa_htslib_samtools:83b50ff84ead50d0"
+
+# ---------------------------------------------------------------------------
+# GATK4_MARKDUPLICATES — nf-core/gatk4/markduplicates module
+# (ext.args '--REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT',
+# ext.prefix '{meta.id}.md.cram', CRAM conversion via samtools)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_markduplicates"
+input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+output = [
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram",
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram.crai",
+  "{config.out_dir}/reports/markduplicates/{sample}/{sample}.md.metrics",
+]
+description = "Mark duplicates with GATK4 MarkDuplicates and convert to CRAM (nf-core GATK4_MARKDUPLICATES)"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/markduplicates/{sample} {config.out_dir}/reports/markduplicates/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx24576M -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
+samtools view -Ch -T reference.fasta -o {sample}.md.cram {sample}.md.bam
+rm {sample}.md.bam
+samtools index {sample}.md.cram
+mv {sample}.md.cram {sample}.md.cram.crai {config.out_dir}/preprocessing/markduplicates/{sample}/
+mv {sample}.md.metrics {config.out_dir}/reports/markduplicates/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "30G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel_htslib_samtools:d3becb6465454c35"
+
+# ---------------------------------------------------------------------------
+# CRAM_QC_MOSDEPTH_SAMTOOLS on MarkDuplicates output (nf-core MOSDEPTH +
+# SAMTOOLS_STATS; ext.prefix '{meta.id}.md')
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "mosdepth_md"
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
+output = [
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.mosdepth.global.dist.txt",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.mosdepth.summary.txt",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.regions.bed.gz",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.regions.bed.gz.csi",
+]
+description = "Mosdepth coverage on MarkDuplicates CRAM (ext.args '-n --fast-mode --by 500' for WGS)"
+when = "!config.skip_mosdepth"
+shell = """
+mkdir -p {config.out_dir}/reports/mosdepth/{sample}
+cp -L {config.fasta} ./reference.fasta
+mosdepth --threads 4 --fasta reference.fasta -n --fast-mode --by 500 {sample}.md {input[0]}
+mv {sample}.md.mosdepth.global.dist.txt {sample}.md.mosdepth.summary.txt {sample}.md.regions.bed.gz {sample}.md.regions.bed.gz.csi {config.out_dir}/reports/mosdepth/{sample}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "4G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+
+[[rules]]
+name = "samtools_stats_md"
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
+output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.md.cram.stats"]
+description = "Samtools stats on MarkDuplicates CRAM (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.md.cram')"
+when = "!config.skip_samtools"
+shell = """
+mkdir -p {config.out_dir}/reports/samtools/{sample}
+cp -L {config.fasta} ./reference.fasta
+samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.md.cram.stats
+mv {sample}.md.cram.stats {config.out_dir}/reports/samtools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+
+# ---------------------------------------------------------------------------
+# GATK4_BASERECALIBRATOR — nf-core/gatk4/baserecalibrator module
+# (ext.prefix '{meta.id}.recal'; known-sites = dbsnp + 2 GRCh38 indel sets)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_baserecalibrator"
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
+output = ["{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table"]
+description = "Base quality score recalibration table (nf-core GATK4_BASERECALIBRATOR)"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/recal_table/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+SITES="--known-sites $(basename {config.dbsnp})"
+for v in $(echo {config.known_indels} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+    SITES="$SITES --known-sites $(basename "$v")"
+done
+for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+done
+gatk --java-options "-Xmx3276M -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {sample}.recal.table --reference reference.fasta $SITES --tmp-dir .
+mv {sample}.recal.table {config.out_dir}/preprocessing/recal_table/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+
+# ---------------------------------------------------------------------------
+# GATK4_APPLYBQSR — nf-core/gatk4/applybqsr module (output_suffix 'cram' since
+# save_output_as_bam=false; ext.prefix '{meta.id}.recal')
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_applybqsr"
+input = [
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram",
+  "{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table",
+]
+output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+description = "Apply base quality score recalibration to CRAM (nf-core GATK4_APPLYBQSR)"
+shell = """
+mkdir -p {config.out_dir}/recalibrated/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx3276M -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
+mv {sample}.recal.cram {config.out_dir}/recalibrated/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+
+# ---------------------------------------------------------------------------
+# CRAM_SAMPLEQC on the recalibrated CRAM: SAMTOOLS_INDEX, MOSDEPTH, SAMTOOLS_STATS
+# (ext.prefixes '{meta.id}.recal' / '{meta.id}.recal.cram')
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "samtools_index_recal"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram.crai"]
+description = "Index recalibrated CRAM (nf-core SAMTOOLS_INDEX)"
+shell = "samtools index -@ 1 {input[0]}"
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+
+[[rules]]
+name = "mosdepth_recal"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+output = [
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.global.dist.txt",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.summary.txt",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.regions.bed.gz",
+  "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.regions.bed.gz.csi",
+]
+description = "Mosdepth coverage on recalibrated CRAM (nf-core MOSDEPTH, ext.prefix '{meta.id}.recal')"
+when = "!config.skip_mosdepth"
+shell = """
+mkdir -p {config.out_dir}/reports/mosdepth/{sample}
+cp -L {config.fasta} ./reference.fasta
+mosdepth --threads 4 --fasta reference.fasta -n --fast-mode --by 500 {sample}.recal {input[0]}
+mv {sample}.recal.mosdepth.global.dist.txt {sample}.recal.mosdepth.summary.txt {sample}.recal.regions.bed.gz {sample}.recal.regions.bed.gz.csi {config.out_dir}/reports/mosdepth/{sample}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "4G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+
+[[rules]]
+name = "samtools_stats_recal"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.recal.cram.stats"]
+description = "Samtools stats on recalibrated CRAM (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.recal.cram')"
+when = "!config.skip_samtools"
+shell = """
+mkdir -p {config.out_dir}/reports/samtools/{sample}
+cp -L {config.fasta} ./reference.fasta
+samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.recal.cram.stats
+mv {sample}.recal.cram.stats {config.out_dir}/reports/samtools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+
+# ---------------------------------------------------------------------------
+# GATK4_HAPLOTYPECALLER — nf-core/gatk4/haplotypecaller module
+# (joint_germline=false => no -ERC GVCF; --pcr-indel-model CONSERVATIVE;
+# ext.prefix '{meta.id}.haplotypecaller'; GATK auto-writes the .tbi)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_haplotypecaller"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz.tbi",
+]
+description = "Germline variant calling with GATK4 HaplotypeCaller (nf-core GATK4_HAPLOTYPECALLER)"
+when = "config.call_haplotypecaller"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+gatk --java-options "-Xmx9830M -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model}
+mv {sample}.haplotypecaller.vcf.gz {sample}.haplotypecaller.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+
+# ---------------------------------------------------------------------------
+# VCF_VARIANT_FILTERING_GATK — nf-core gatk4/cnnscorevariants +
+# gatk4/filtervarianttranches (upstream runs after HaplotypeCaller on the
+# default path; skip_tools 'haplotypecaller_filter' opts out)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_cnnscorevariants"
+input = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz.tbi",
+]
+output = [
+  "{config.out_dir}/variant_calling/cnnscorevariants/{sample}/{sample}.cnn.vcf.gz",
+  "{config.out_dir}/variant_calling/cnnscorevariants/{sample}/{sample}.cnn.vcf.gz.tbi",
+]
+description = "CNN 1D variant score annotation (nf-core GATK4_CNNSCOREVARIANTS, default --tensor-type 1D; upstream publishDir is disabled — the port keeps this intermediate under results/ for DAG handoff)"
+when = "config.call_haplotypecaller"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/cnnscorevariants/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+export THEANO_FLAGS="base_compiledir=$PWD"
+gatk --java-options "-Xmx9830M -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
+mv {sample}.cnn.vcf.gz {sample}.cnn.vcf.gz.tbi {config.out_dir}/variant_calling/cnnscorevariants/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+
+[[rules]]
+name = "gatk_filtervarianttranches"
+input = [
+  "{config.out_dir}/variant_calling/cnnscorevariants/{sample}/{sample}.cnn.vcf.gz",
+  "{config.out_dir}/variant_calling/cnnscorevariants/{sample}/{sample}.cnn.vcf.gz.tbi",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz.tbi",
+]
+description = "Tranche filtering of CNN-scored variants (nf-core GATK4_FILTERVARIANTTRANCHES, ext.args '--info-key CNN_1D', ext.prefix '{sample}.haplotypecaller'; known sites as --resource)"
+when = "config.call_haplotypecaller"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+SITES="--resource $(basename {config.dbsnp})"
+for v in $(echo {config.known_indels} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+    SITES="$SITES --resource $(basename "$v")"
+done
+for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+done
+gatk --java-options "-Xmx9830M -XX:-UsePerfData" FilterVariantTranches --variant {input[0]} $SITES --output {sample}.haplotypecaller.filtered.vcf.gz --tmp-dir . --info-key CNN_1D
+mv {sample}.haplotypecaller.filtered.vcf.gz {sample}.haplotypecaller.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+
+# ---------------------------------------------------------------------------
+# VCF_QC_BCFTOOLS_VCFTOOLS — nf-core bcftools/stats + vcftools (x3)
+# (ext.prefix = vcf basename minus '.vcf' = '{meta.id}.haplotypecaller.filtered')
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bcftools_stats"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the filtered VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_haplotypecaller && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/haplotypecaller/{sample}
+bcftools stats {input[0]} > {sample}.haplotypecaller.filtered.bcftools_stats.txt
+mv {sample}.haplotypecaller.filtered.bcftools_stats.txt {config.out_dir}/reports/bcftools/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/bcftools_htslib:1.23.1--9f08ec665533d64a"
+
+[[rules]]
+name = "vcftools_tstv_count"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the filtered VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_haplotypecaller && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.haplotypecaller.filtered
+mv {sample}.haplotypecaller.filtered.TsTv.count {config.out_dir}/reports/vcftools/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the filtered VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_haplotypecaller && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.haplotypecaller.filtered
+mv {sample}.haplotypecaller.filtered.TsTv.qual {config.out_dir}/reports/vcftools/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.FILTER.summary"]
+description = "VCF QC: FILTER summary on the filtered VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_haplotypecaller && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.haplotypecaller.filtered
+mv {sample}.haplotypecaller.filtered.FILTER.summary {config.out_dir}/reports/vcftools/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+# ---------------------------------------------------------------------------
+# ENSEMBLVEP_VEP — nf-core/ensemblvep/vep module
+# (GRCh38: --assembly GRCh38 --species homo_sapiens --cache --cache_version 116
+# --dir_cache /.vep; ext.args '--stats_file <id>_VEP.ann.summary.html --vcf';
+# ext.prefix = vcf basename minus '.vcf' + '_VEP.ann'; tabix index after)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "ensemblvep_vep"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.summary.html",
+]
+description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at /.vep in the container)"
+when = "config.call_haplotypecaller && config.annotate_vep"
+shell = """
+mkdir -p {config.out_dir}/annotation/haplotypecaller/{sample} {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}
+vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache /.vep --fork 6
+tabix {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz
+mv {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/{sample}/
+mv {sample}.haplotypecaller.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/ensembl-vep_perl-math-cdf_htslib:c4edd3fb4a233ae6"
+
+# ---------------------------------------------------------------------------
+# MULTIQC — nf-core/multiqc module; scans the results directory with the
+# upstream assets/multiqc_config.yml (fan-in over every report producer)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "multiqc"
+input = []
+depends_on = [
+  "fastqc",
+  "fastp",
+  "gatk_markduplicates",
+  "mosdepth_md",
+  "samtools_stats_md",
+  "mosdepth_recal",
+  "samtools_stats_recal",
+  "gatk_cnnscorevariants",
+  "gatk_filtervarianttranches",
+  "bcftools_stats",
+  "vcftools_tstv_count",
+  "vcftools_tstv_qual",
+  "vcftools_filter_summary",
+  "ensemblvep_vep",
+]
+output = ["{config.out_dir}/multiqc_report.html"]
+description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"
+when = "!config.skip_multiqc"
+shell = """
+mkdir -p {config.out_dir}
+cp -L assets/nf-core-sarek_logo_light.png {config.out_dir}/
+cd {config.out_dir}
+multiqc --force --config ../assets/multiqc_config.yml .
+"""
+
+[rules.resources]
+threads = 4
+memory = "12G"
+
+[rules.environment]
+docker = "community.wave.seqera.io/library/multiqc:1.35--c17fb751507e9dfc"
