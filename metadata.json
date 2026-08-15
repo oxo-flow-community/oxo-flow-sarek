@@ -1,7 +1,9 @@
 {
   "name": "oxo-flow-sarek",
-  "title": "nf-core/sarek (port) — WGS/WES germline and somatic variant calling",
-  "engine": "oxo-flow",
+  "title": "WGS/WES germline and somatic variant calling",
+  "origin": "port",
+  "rating": "verified",
+  "engine": "nextflow",
   "source": {
     "repo": "nf-core/sarek",
     "url": "https://github.com/nf-core/sarek",
@@ -12,7 +14,6 @@
   "created": "2026-08-15",
   "domain": "genomics",
   "tags": ["wgs", "wes", "germline", "somatic", "variant-calling", "gatk", "bwa", "vep", "nf-core"],
-  "description": "oxo-flow port of nf-core/sarek 3.10.0 default main path: FastQC, fastp trim/split, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, CNN 1D scoring + tranche filtering (VCF_VARIANT_FILTERING_GATK), VEP annotation, VCF QC and MultiQC for WGS/WES germline and somatic variant calling.",
   "scope": [
     "fastqc", "fastp", "bwa_mem", "gatk_markduplicates", "mosdepth_md",
     "samtools_stats_md", "gatk_baserecalibrator", "gatk_applybqsr",
@@ -35,19 +36,33 @@
   ],
   "rule_count": 20,
   "tools": [
-    "fastqc@0.12.1",
-    "fastp@1.1.0",
-    "bwa@0.7.19",
-    "samtools@1.24",
-    "gatk@4.6.2.0",
-    "mosdepth@0.3.14",
-    "bcftools@1.23.1",
-    "vcftools@0.1.17",
-    "ensembl-vep@116.0",
-    "multiqc@1.35"
+    "fastqc",
+    "fastp",
+    "bwa",
+    "samtools",
+    "gatk",
+    "mosdepth",
+    "bcftools",
+    "vcftools",
+    "ensembl-vep",
+    "multiqc"
   ],
-  "status": "ready",
+  "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM alignment, MarkDuplicates with CRAM conversion, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling, CNN 1D scoring with tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report.",
+  "installation": {
+    "engine": "oxo-flow >= 0.11.0",
+    "toolchain": "containers (Docker) — pinned images",
+    "requirements": [
+      "paired-end FASTQ reads at raw/{sample}_R1.fastq.gz / raw/{sample}_R2.fastq.gz",
+      "GRCh38 genome FASTA plus .fai and .dict",
+      "GRCh38 BWA index directory (bwa_index_dir)",
+      "GATK bundle known-sites VCFs with .tbi: dbsnp_146.hg38.vcf.gz, Mills_and_1000G_gold_standard.indels.hg38.vcf.gz, Homo_sapiens_assembly38.known_indels.vcf.gz",
+      "VEP cache (GRCh38, homo_sapiens, cache version 116) mounted at /.vep in the container",
+      "compute: up to 24 CPUs / 36 GB per rule (BWA-MEM 24 threads/30G; VEP 6 threads/36G)",
+      "input cap: ~50M read pairs per sample (fastp split, see fidelity deviations)",
+      "disk: results/ for per-sample CRAMs/VCFs/reports, plus the reference bundle and VEP cache"
+    ]
+  },
   "repo_url": "https://github.com/oxo-flow-community/oxo-flow-sarek",
-  "site_page": "https://oxo-flow-community.github.io/oxo-flow-sarek/",
+  "license": "Apache-2.0",
   "upstream_license": "MIT"
 }

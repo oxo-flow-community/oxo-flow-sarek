@@ -1,24 +1,94 @@
-# oxo-flow-sarek
+# oxo-flow-sarek — WGS/WES germline and somatic variant calling
 
 [![CI](https://github.com/oxo-flow-community/oxo-flow-sarek/actions/workflows/ci.yml/badge.svg)](https://github.com/oxo-flow-community/oxo-flow-sarek/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-WGS/WES germline and somatic variant calling — QC (FastQC), trimming/splitting
-(fastp), BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, VEP
-annotation and MultiQC aggregation, following GATK best practices for both
-germline (single-sample HaplotypeCaller) and somatic (no variants called on the
-default path without a matched tumor-normal setup) analyses. Produces CRAM
-alignments, recalibration tables, VCFs, per-sample QC reports and a MultiQC
-report.
+> ★ Verified · ⇄ Official port of [`nf-core/sarek`](https://github.com/nf-core/sarek) @ `3.10.0` — same tools, same versions, same commands. Part of the [oxo-flow-community catalog](https://oxo-flow-community.github.io/).
+
+Run the GATK best-practice variant-calling path for whole-genome and
+whole-exome sequencing (WGS/WES) data, germline by default: FastQC quality
+control, fastp trimming and splitting, BWA-MEM alignment with read-group
+metadata, GATK MarkDuplicates with CRAM conversion, base quality score
+recalibration (BQSR), single-sample HaplotypeCaller variant calling, CNN 1D
+scoring with tranche filtering, VEP annotation, per-sample QC (mosdepth,
+samtools stats, bcftools stats, vcftools TsTv/FILTER summaries) and a final
+MultiQC report. You get CRAM alignments, recalibration tables, filtered and
+annotated VCFs, per-sample QC reports and a MultiQC report.
+
+## Installation
+
+### 1. Install oxo-flow
+
+Requires **oxo-flow >= 0.11.0**. Release binary (recommended):
+
+```bash
+curl -fL -o oxo-flow.tar.gz \
+  https://github.com/Traitome/oxo-flow/releases/download/v0.11.0/oxo-flow-v0.11.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf oxo-flow.tar.gz
+sudo mv oxo-flow /usr/local/bin/
+```
+
+Alternatively via conda: `conda install -c bioconda oxo-flow-cli` (note: the
+conda package may lag behind releases; other platform binaries are available
+on the [releases page](https://github.com/Traitome/oxo-flow/releases)).
+
+### 2. Get this workflow
+
+```bash
+git clone https://github.com/oxo-flow-community/oxo-flow-sarek.git
+cd oxo-flow-sarek
+```
+
+### 3. Requirements
+
+- **Reference data (GRCh38, user-provided)** — point the `[config]` block of
+  `main.oxoflow` at your bundle:
+  - genome FASTA plus `.fai` and `.dict` (`fasta` / `fasta_fai` / `dict`);
+  - a BWA index directory (`bwa_index_dir`);
+  - GATK bundle known-sites VCFs with `.tbi` (`dbsnp` + `known_indels`):
+    `dbsnp_146.hg38.vcf.gz`, `Mills_and_1000G_gold_standard.indels.hg38.vcf.gz`,
+    `Homo_sapiens_assembly38.known_indels.vcf.gz`;
+  - a VEP cache (GRCh38, homo_sapiens, cache version 116) mounted at `/.vep`
+    in the container for the annotation step.
+- **Input reads** — paired-end FASTQ at `raw/{sample}_R1.fastq.gz` and
+  `raw/{sample}_R2.fastq.gz`; supported input size is capped at ~50M read
+  pairs per sample (fastp split cap, see Fidelity).
+- **Compute** — up to 24 CPUs / 36 GB per rule (BWA-MEM: 24 threads / 30G;
+  VEP: 6 threads / 36G).
+- **Tools** — Docker containers with pinned images, declared per rule in
+  `main.oxoflow` (`[rules.environment]`); Docker is required at runtime (no
+  conda environments are used).
+- **Disk** — `results/` grows with per-sample CRAMs, VCFs and reports; the
+  GRCh38 reference bundle and VEP cache require substantial disk space of
+  their own.
+
+## Usage
+
+```bash
+# 1. install oxo-flow (see Requirements)
+# 2. prepare data: raw/<sample>_R1.fastq.gz / _R2.fastq.gz (see fixtures/)
+# 3. point the reference config at your GRCh38 bundle
+#    (main.oxoflow [config] fasta/fasta_fai/dict/bwa_index_dir/dbsnp/known_indels)
+# 4. preview the plan
+oxo-flow dry-run main.oxoflow
+# 5. run
+oxo-flow run main.oxoflow -j 8
+# 6. run a subset
+oxo-flow run main.oxoflow -t multiqc --samples first:2
+```
+
+The bundled fixtures (`test/fixtures/raw/test_R1.fastq.gz` /
+`test_R2.fastq.gz`, from nf-core/test-datasets) let you exercise the DAG from
+FastQC through BWA-MEM; the BWA-MEM step itself needs a GRCh38 index
+(`config.bwa_index_dir`), and the BQSR/Haplotypecaller/VEP steps need the
+corresponding GATK bundle files and a VEP cache.
 
 ## Source
 
-Ported from **[nf-core/sarek](https://github.com/nf-core/sarek)**, version
-`3.10.0` (MIT). This port is maintained independently and **may lag the
-upstream** — check the `8ccac7ad37b05dd792447763bf9671b719824587` commit and
-the fidelity table below for the exact ported state.
-
-Created 2026-08-15.
+Upstream: **[nf-core/sarek](https://github.com/nf-core/sarek)** @ `3.10.0`
+(commit `8ccac7ad37b05dd792447763bf9671b719824587`), MIT license. Created
+2026-08-15; this workflow may lag behind upstream releases. See
+[NOTICE.md](NOTICE.md) for attribution.
 
 ## Fidelity
 
@@ -83,51 +153,17 @@ Deviations (all documented, nothing silently dropped):
 - **`known_indels`** is a TOML array (2 GRCh38 files); both it and
   `known_indels_tbi` must be updated together when changing references.
 
-## Quickstart
+## Test
 
 ```bash
-# 1. install oxo-flow (see Requirements)
-# 2. prepare data: raw/<sample>_R1.fastq.gz / _R2.fastq.gz (see fixtures/)
-# 3. point the reference config at your GRCh38 bundle
-#    (main.oxoflow [config] fasta/fasta_fai/dict/bwa_index_dir/dbsnp/known_indels)
-# 4. preview the plan
-oxo-flow dry-run main.oxoflow
-# 5. run
-oxo-flow run main.oxoflow -j 8
-# 6. run a subset
-oxo-flow run main.oxoflow -t multiqc --samples first:2
+bash test/run.sh
 ```
 
-The bundled fixtures (`test/fixtures/raw/test_R1.fastq.gz` /
-`test_R2.fastq.gz`, from nf-core/test-datasets) let you exercise the DAG from
-FastQC through BWA-MEM; the BWA-MEM step itself needs a GRCh38 index
-(`config.bwa_index_dir`), and the BQSR/Haplotypecaller/VEP steps need the
-corresponding GATK bundle files and a VEP cache.
-
-## Requirements
-
-- **oxo-flow ≥ 0.11.0** — install the prebuilt binary:
-
-```bash
-curl -fL -o oxo-flow.tar.gz \
-  https://github.com/Traitome/oxo-flow/releases/download/v0.11.0/oxo-flow-v0.11.0-x86_64-unknown-linux-gnu.tar.gz
-tar xzf oxo-flow.tar.gz
-sudo mv oxo-flow /usr/local/bin/
-```
-
-- Conda users may alternatively `conda install -c bioconda oxo-flow-cli`
-  (note: the bioconda package currently lags the release binary at 0.10.2 —
-  some 0.11.0 format features may not validate).
-- Docker at runtime, per the pinned container images declared in
-  `main.oxoflow` (the GATK BQSR chain and the BWA pipe need multi-tool images,
-  which oxo-flow runs as-is).
-- A GRCh38 reference bundle and a VEP cache (`/.vep`) for the annotation step.
+Runs `oxo-flow validate`, `oxo-flow lint` and a `dry-run` smoke check; CI runs
+the same script on every push.
 
 ## License
 
 Apache-2.0. Copyright (c) 2026 oxo-flow-community. Upstream attribution in
-[NOTICE.md](NOTICE.md).
-
-## Community
-
-https://oxo-flow-community.github.io/
+[NOTICE.md](NOTICE.md); the upstream MIT license is included verbatim at
+[LICENSE.upstream](LICENSE.upstream).
