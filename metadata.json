@@ -49,7 +49,7 @@
   ],
   "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM alignment, MarkDuplicates with CRAM conversion, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling, CNN 1D scoring with tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report.",
   "installation": {
-    "engine": "oxo-flow >= 0.11.0",
+    "engine": "oxo-flow >= 0.12.0",
     "toolchain": "containers (Docker) — pinned images",
     "requirements": [
       "paired-end FASTQ reads at raw/{sample}_R1.fastq.gz / raw/{sample}_R2.fastq.gz",
