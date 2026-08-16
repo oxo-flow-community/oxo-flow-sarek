@@ -38,7 +38,7 @@ vep_cache_version = 116
 patient = "test"
 sex = "XX"
 status = 0
-lane = "test_L1"
+lane = "L1"
 
 # tools / skip_tools equivalents (upstream comma-list params expressed as booleans)
 call_haplotypecaller = true
@@ -69,7 +69,7 @@ known_indels_tbi = [
 
 [[sample_groups]]
 name = "cohort"
-samples = ["test"]
+samples = ["test", "test2"]
 
 # ---------------------------------------------------------------------------
 # FASTQC — nf-core/fastqc module (raw reads QC)
