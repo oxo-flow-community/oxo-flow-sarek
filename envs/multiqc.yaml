@@ -1,0 +1,9 @@
+# Upstream nf-core/sarek module env (conda equivalent of the wave.seqera.io
+# community image). Channel NAMES only - CN users point conda at a
+# domestic mirror, international users use the defaults.
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - multiqc=1.35

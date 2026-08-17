@@ -131,7 +131,7 @@ threads = 12
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57"
+conda = "envs/fastp.yaml"
 
 # ---------------------------------------------------------------------------
 # BWA_MEM — nf-core/bwa/mem module (aligner 'bwa-mem', upstream default;
@@ -158,7 +158,7 @@ threads = 24
 memory = "30G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/bwa_htslib_samtools:83b50ff84ead50d0"
+conda = "envs/bwa-samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_MARKDUPLICATES — nf-core/gatk4/markduplicates module
@@ -192,7 +192,7 @@ threads = 6
 memory = "30G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel_htslib_samtools:d3becb6465454c35"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # CRAM_QC_MOSDEPTH_SAMTOOLS on MarkDuplicates output (nf-core MOSDEPTH +
@@ -221,7 +221,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_md"
@@ -241,7 +241,7 @@ threads = 1
 memory = "6G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_BASERECALIBRATOR — nf-core/gatk4/baserecalibrator module
@@ -275,7 +275,7 @@ threads = 2
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_APPLYBQSR — nf-core/gatk4/applybqsr module (output_suffix 'cram' since
@@ -303,7 +303,7 @@ threads = 2
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # CRAM_SAMPLEQC on the recalibrated CRAM: SAMTOOLS_INDEX, MOSDEPTH, SAMTOOLS_STATS
@@ -321,7 +321,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 [[rules]]
 name = "mosdepth_recal"
@@ -346,7 +346,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_recal"
@@ -366,7 +366,7 @@ threads = 1
 memory = "6G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_HAPLOTYPECALLER — nf-core/gatk4/haplotypecaller module
@@ -397,7 +397,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # VCF_VARIANT_FILTERING_GATK — nf-core gatk4/cnnscorevariants +
@@ -431,7 +431,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 [[rules]]
 name = "gatk_filtervarianttranches"
@@ -468,7 +468,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # VCF_QC_BCFTOOLS_VCFTOOLS — nf-core bcftools/stats + vcftools (x3)
@@ -491,7 +491,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/bcftools_htslib:1.23.1--9f08ec665533d64a"
+conda = "envs/bcftools.yaml"
 
 [[rules]]
 name = "vcftools_tstv_count"
@@ -579,7 +579,7 @@ threads = 6
 memory = "36G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/ensembl-vep_perl-math-cdf_htslib:c4edd3fb4a233ae6"
+conda = "envs/vep.yaml"
 
 # ---------------------------------------------------------------------------
 # MULTIQC — nf-core/multiqc module; scans the results directory with the
@@ -619,4 +619,4 @@ threads = 4
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/multiqc:1.35--c17fb751507e9dfc"
+conda = "envs/multiqc.yaml"
