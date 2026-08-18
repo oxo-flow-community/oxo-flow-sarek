@@ -149,7 +149,11 @@ shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
 for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
 INDEX=$(find -L ./ -name "*.amb" | sed 's/\\.amb$//')
-bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t 24 $INDEX {input[0]} {input[1]} | samtools sort --threads 24 -o {sample}.0001.bam -
+# {effective_threads} + a bounded per-thread sort buffer: the upstream
+# 24-thread label over-subscribes small machines and samtools sort's
+# default 768M/thread would request ~18G (live: 'couldn't allocate
+# memory for bam_mem' on a 4G box).
+bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.0001.bam -
 mv {sample}.0001.bam {config.out_dir}/preprocessing/mapped/{sample}/
 """
 
