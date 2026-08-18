@@ -179,7 +179,7 @@ mkdir -p {config.out_dir}/preprocessing/markduplicates/{sample} {config.out_dir}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx24576M -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
 samtools view -Ch -T reference.fasta -o {sample}.md.cram {sample}.md.bam
 rm {sample}.md.bam
 samtools index {sample}.md.cram
@@ -266,7 +266,7 @@ done
 for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
     cp -L "$v" .
 done
-gatk --java-options "-Xmx3276M -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {sample}.recal.table --reference reference.fasta $SITES --tmp-dir .
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {sample}.recal.table --reference reference.fasta $SITES --tmp-dir .
 mv {sample}.recal.table {config.out_dir}/preprocessing/recal_table/{sample}/
 """
 
@@ -294,7 +294,7 @@ mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx3276M -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
 mv {sample}.recal.cram {config.out_dir}/recalibrated/{sample}/
 """
 
@@ -388,7 +388,7 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 cp -L {config.dbsnp} {config.dbsnp_tbi} .
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model}
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model}
 mv {sample}.haplotypecaller.vcf.gz {sample}.haplotypecaller.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
 """
 
@@ -422,7 +422,7 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 export THEANO_FLAGS="base_compiledir=$PWD"
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
 mv {sample}.cnn.vcf.gz {sample}.cnn.vcf.gz.tbi {config.out_dir}/variant_calling/cnnscorevariants/{sample}/
 """
 
@@ -459,7 +459,7 @@ done
 for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
     cp -L "$v" .
 done
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" FilterVariantTranches --variant {input[0]} $SITES --output {sample}.haplotypecaller.filtered.vcf.gz --tmp-dir . --info-key CNN_1D
+gatk --java-options "{effective_memory_mb}m -XX:-UsePerfData" FilterVariantTranches --variant {input[0]} $SITES --output {sample}.haplotypecaller.filtered.vcf.gz --tmp-dir . --info-key CNN_1D
 mv {sample}.haplotypecaller.filtered.vcf.gz {sample}.haplotypecaller.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
 """
 
