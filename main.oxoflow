@@ -343,7 +343,13 @@ conda = "envs/samtools.yaml"
 
 [[rules]]
 name = "mosdepth_recal"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+# the .crai input is the DAG edge to samtools_index_recal — mosdepth
+# requires an indexed alignment file, and without this edge it races
+# the indexer (live: 'alignment file must be indexed')
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram.crai",
+]
 output = [
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.global.dist.txt",
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.summary.txt",
