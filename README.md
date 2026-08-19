@@ -50,8 +50,9 @@ cd oxo-flow-sarek
     `Homo_sapiens_assembly38.known_indels.vcf.gz`;
   - a VEP cache (GRCh38, homo_sapiens, cache version 112 — must match the
     ensembl-vep 112 binary in envs/vep.yaml; a gtf2vep-built subset cache
-    works too) at `vep_dir_cache` (default `/.vep`, as upstream) for the
-    annotation step.
+    works too) at `vep_dir_cache` (default `/.vep`, as upstream) + `vep_cache_ready = true`
+    for the annotation step (upstream fails hard without the cache; the
+    port gates the VEP rule on the flag instead).
 - **Input reads** — paired-end FASTQ at `raw/{sample}_R1.fastq.gz` and
   `raw/{sample}_R2.fastq.gz`; supported input size is capped at ~50M read
   pairs per sample (fastp split cap, see Fidelity).
@@ -117,7 +118,7 @@ Rows cover every upstream process/rule on the default main execution path.
 | VCFTOOLS_TSTV_COUNT | `vcftools_tstv_count` | vcftools 0.1.17 | VCF_QC_BCFTOOLS_VCFTOOLS part 2; runs on the filtered VCF |
 | VCFTOOLS_TSTV_QUAL | `vcftools_tstv_qual` | vcftools 0.1.17 | VCF_QC_BCFTOOLS_VCFTOOLS part 3; runs on the filtered VCF |
 | VCFTOOLS_SUMMARY | `vcftools_filter_summary` | vcftools 0.1.17 | VCF_QC_BCFTOOLS_VCFTOOLS part 4; runs on the filtered VCF |
-| ENSEMBLVEP_VEP | `ensemblvep_vep` | ensembl-vep 112.0 | annotates the filtered VCF (`{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz`); requires a VEP cache at `vep_dir_cache` (upstream bundles it at `/.vep` via `--vep_cache`); `--cache_version 112` (matches the env binary — VEP caches are version-locked), GRCh38 |
+| ENSEMBLVEP_VEP | `ensemblvep_vep` | ensembl-vep 112.0 | annotates the filtered VCF (`{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz`); **gated on `vep_cache_ready`** — upstream fails hard without the cache (bundled at `/.vep` via `--vep_cache`); set the flag after placing a cache at `vep_dir_cache`; `--cache_version 112` (matches the env binary — VEP caches are version-locked), GRCh38 |
 | MULTIQC | `multiqc` | multiqc 1.35 | fan-in over all report producers; scans the results dir with the upstream `assets/multiqc_config.yml` |
 | NGSCheckMate (BAM_NGSCHECKMATE + BCFTOOLS_MPILEUP) | — not ported | — | sample-identity QC on the CRAM; outside this port's scope (QC fan-in, needs a cohort reference) |
 | PREPARE_GENOME (BWA_INDEX, GATK4_CREATESEQUENCEDICTIONARY, SAMTOOLS_FAIDX) | — not ported | — | reference preparation; the port requires a pre-built reference bundle (upstream also accepts pre-built index/dict/fai via `params.bwa`/`dict`/`fasta_fai`, so this is an upstream-compatible shortcut, not a behavior change) |
