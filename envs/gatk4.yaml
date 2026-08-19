@@ -10,3 +10,6 @@ dependencies:
   - gatk4=4.5.0.0
   - samtools
   - htslib
+  # the gatk launcher script is python (spawns the JVM) — without a
+  # python in the env it dies with "env: 'python': No such file"
+  - python=3.12
