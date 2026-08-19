@@ -13,3 +13,7 @@ dependencies:
   # the gatk launcher script is python (spawns the JVM) — without a
   # python in the env it dies with "env: 'python': No such file"
   - python=3.12
+  # CNNScoreVariants runs its scoring python inline ("import gatktool")
+  # — live: 'A required Python package ("gatktool") could not be
+  # imported into the Python environment'
+  - gatktool
