@@ -446,6 +446,10 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 export THEANO_FLAGS="base_compiledir=$PWD"
+# keras 2.3's default backend is tensorflow — the CNN models are
+# theano-built, so pin the backend (upstream's container image has
+# this as an env var)
+export KERAS_BACKEND=theano
 gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
 mv {sample}.cnn.vcf.gz {sample}.cnn.vcf.gz.tbi {config.out_dir}/variant_calling/cnnscorevariants/{sample}/
 """
