@@ -445,9 +445,13 @@ mkdir -p {config.out_dir}/variant_calling/cnnscorevariants/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-# the scoring python runs on the default keras backend (tensorflow
-# 1.15 in envs/gatk4.yaml) — the bundled 1D model loads under TF,
-# and vqsr_cnn's session API (clear_session/get_session) is TF-only
+# the scoring python runs on the keras TF backend (tensorflow 1.15 in
+# envs/gatk4.yaml) — the bundled 1D model loads under TF and
+# vqsr_cnn's session API (clear_session/get_session) is TF-only. The
+# explicit export matters: a conda keras package's activation script
+# sets KERAS_BACKEND=theano on Linux, which breaks the scoring python
+# (live nack at K.get_session()).
+export KERAS_BACKEND=tensorflow
 gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
 mv {sample}.cnn.vcf.gz {sample}.cnn.vcf.gz.tbi {config.out_dir}/variant_calling/cnnscorevariants/{sample}/
 """
