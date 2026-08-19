@@ -22,12 +22,15 @@ dependencies:
   # be imported' — gatktool 0.0.1 declares only python; its real deps
   # (keras+theano era stack) must be pinned explicitly:
   - gatktool
+  # h5py 2.x: keras 2.3.1 calls bytes.decode on h5 attributes, which
+  # h5py 3+ returns as str (live: 'str' object has no attribute
+  # 'decode' in keras/engine/saving.py)
+  - h5py=2.10.0
   - keras=2.3.1
   # theano 1.0.4, not 1.0.5: 1.0.5 renamed MRG_RandomStreams ->
   # MRG_RandomStream, which keras 2.3.1 still imports (live
   # ImportError at model load)
   - theano=1.0.4
-  - h5py
   # numpy 1.x: the 2019-era keras uses np.float etc. (removed in 2.x);
   # 1.21 is the last numpy supporting python 3.7
   - numpy=1.21
