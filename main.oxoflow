@@ -158,7 +158,7 @@ description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-
 shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
 for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
-INDEX=$(find -L ./ -name "*.amb" | sed 's/\\.amb$//')
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
 # {effective_threads} + a bounded per-thread sort buffer: the upstream
 # 24-thread label over-subscribes small machines and samtools sort's
 # default 768M/thread would request ~18G (live: 'couldn't allocate
