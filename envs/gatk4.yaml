@@ -23,7 +23,10 @@ dependencies:
   # (keras+theano era stack) must be pinned explicitly:
   - gatktool
   - keras=2.3.1
-  - theano=1.0.5
+  # theano 1.0.4, not 1.0.5: 1.0.5 renamed MRG_RandomStreams ->
+  # MRG_RandomStream, which keras 2.3.1 still imports (live
+  # ImportError at model load)
+  - theano=1.0.4
   - h5py
   # numpy 1.x: the 2019-era keras uses np.float etc. (removed in 2.x);
   # 1.21 is the last numpy supporting python 3.7
