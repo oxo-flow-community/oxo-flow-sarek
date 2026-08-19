@@ -8,3 +8,7 @@ channels:
 dependencies:
   - ensembl-vep=112.0
   - htslib
+  # ensembl-vep 112's perl needs List::MoreUtils at import time — the
+  # conda package doesn't pull it (live: "Can't locate List/MoreUtils.pm"
+  # at VariationFeatureAdaptor.pm line 102)
+  - perl-list-moreutils
