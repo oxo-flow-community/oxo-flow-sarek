@@ -12,16 +12,19 @@ dependencies:
   - htslib
   # the gatk launcher script is python (spawns the JVM) — without a
   # python in the env it dies with "env: 'python': No such file"
-  # python 3.9 (not newer): CNNScoreVariants runs its scoring python
-  # inline, and the 1D reference-tensor model needs the keras-2.x +
-  # theano stack — the keras 2.15 conda builds pin python exactly
-  # 3.9 (>=3.9,<3.10)
-  - python=3.9
+  # python 3.7 (not newer): CNNScoreVariants runs its scoring python
+  # inline, and the 1D reference-tensor model needs the theano-backed
+  # keras — theano support was dropped in keras 2.4+, and the keras
+  # 2.3.1 conda builds pin python <=3.7. The gatk launcher is happy
+  # on 3.7.
+  - python=3.7
   # CNNScoreVariants: 'A required Python package ("gatktool") could not
   # be imported' — gatktool 0.0.1 declares only python; its real deps
   # (keras+theano era stack) must be pinned explicitly:
   - gatktool
-  - keras=2.15.0
-  - theano-pymc
+  - keras=2.3.1
+  - theano=1.0.5
   - h5py
-  - numpy=1.26
+  # numpy 1.x: the 2019-era keras uses np.float etc. (removed in 2.x);
+  # 1.21 is the last numpy supporting python 3.7
+  - numpy=1.21
