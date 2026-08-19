@@ -31,7 +31,14 @@ gatk_pcr_indel_model = "CONSERVATIVE"
 seq_platform = "ILLUMINA"
 vep_genome = "GRCh38"
 vep_species = "homo_sapiens"
-vep_cache_version = 116
+# The VEP cache version must match the VEP binary in envs/vep.yaml
+# (upstream's image pins 116; this env ships ensembl-vep 112, whose
+# cache format is version-locked — a 116 cache is unreadable).
+# Cache dir is user data (upstream bundles it in the container at
+# /.vep) — point vep_dir_cache at a real VEP cache (whole-genome or a
+# gtf2vep-built subset; see README).
+vep_cache_version = 112
+vep_dir_cache = "/.vep"
 
 # Sample metadata — mirrors tests/csv/3.0/fastq_single.csv (single-lane model:
 # nf-core/sarek meta.id = "{sample}-{lane}", read-group ID = "{sample}.{lane}")
@@ -568,11 +575,11 @@ output = [
   "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi",
   "{config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.summary.html",
 ]
-description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at /.vep in the container)"
+description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache)"
 when = "config.call_haplotypecaller && config.annotate_vep"
 shell = """
 mkdir -p {config.out_dir}/annotation/haplotypecaller/{sample} {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}
-vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache /.vep --fork 6
+vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
 tabix {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz
 mv {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/{sample}/
 mv {sample}.haplotypecaller.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/
