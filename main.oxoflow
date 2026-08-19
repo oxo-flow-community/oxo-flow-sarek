@@ -194,7 +194,11 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
-samtools view -Ch -T reference.fasta -o {sample}.md.cram {sample}.md.bam
+# CRAM 3.0: the env's samtools 1.24 defaults to CRAM 3.1, which
+# GATK 4.5.0.0's bundled htsjdk cannot read (live:
+# 'java.lang.RuntimeException: CRAM version 3.1 is not supported'
+# in BaseRecalibrator)
+samtools view -Ch -T reference.fasta -O cram,version=3.0 -o {sample}.md.cram {sample}.md.bam
 rm {sample}.md.bam
 samtools index {sample}.md.cram
 mv {sample}.md.cram {sample}.md.cram.crai {config.out_dir}/preprocessing/markduplicates/{sample}/
