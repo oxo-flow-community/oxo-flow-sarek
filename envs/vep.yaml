@@ -1,0 +1,14 @@
+# Upstream nf-core/sarek module env (conda equivalent of the wave.seqera.io
+# community image). Channel NAMES only - CN users point conda at a
+# domestic mirror, international users use the defaults.
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - ensembl-vep=112.0
+  - htslib
+  # ensembl-vep 112's perl needs List::MoreUtils at import time — the
+  # conda package doesn't pull it (live: "Can't locate List/MoreUtils.pm"
+  # at VariationFeatureAdaptor.pm line 102)
+  - perl-list-moreutils

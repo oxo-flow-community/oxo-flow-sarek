@@ -1,0 +1,13 @@
+# Upstream nf-core/sarek module env (conda equivalent of the wave.seqera.io
+# community image). Channel NAMES only - CN users point conda at a
+# domestic mirror, international users use the defaults.
+# Companion versions are unpinned: bwa's zlib-era builds must align with
+# the solver's libzlib (live: zlib 1.2.13 vs libzlib >=1.3.2 conflict).
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - bwa=0.7.17
+  - samtools
+  - htslib

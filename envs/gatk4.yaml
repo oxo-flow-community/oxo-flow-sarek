@@ -1,0 +1,37 @@
+# Upstream nf-core/sarek module env (conda equivalent of the wave.seqera.io
+# community image, gcnvkernel included in gatk4). Channel NAMES only -
+# CN users point conda at a domestic mirror, international users use the
+# defaults. Companion versions unpinned for solver alignment.
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - gatk4=4.5.0.0
+  - samtools
+  - htslib
+  # the gatk launcher script is python (spawns the JVM) — without a
+  # python in the env it dies with "env: 'python': No such file"
+  # python 3.6 (not newer): CNNScoreVariants runs its scoring python
+  # inline, and that 2017-era stack (keras 2.2.4 + tensorflow 1.15)
+  # tops out at python 3.6. (nf-core's own module: "CNNSCOREVARIANTS
+  # does not support Conda" — this env IS that stack, pinned and
+  # live-verified.)
+  - python=3.6
+  - pip
+  - pip:
+      # CNNScoreVariants scoring python, pinned to the model's era
+      # (live-verified on a real run; every newer pairing fails —
+      # keras 2.3+/h5py 3 str-vs-bytes, theano-1.0 MRG rename,
+      # keras 2.15 drops theano, TF-2 breaks the session API):
+      - gatktool==0.0.1
+      - keras==2.2.4
+      - h5py==2.7.1
+      - tensorflow==1.15.5
+      - matplotlib==3.3.4
+      - scipy==1.2.0
+      - scikit-learn==0.24.2
+      # GATK's CNN scoring runs 'from vqsr_cnn import ...' (live:
+      # ModuleNotFoundError: No module named 'vqsr_cnn') — the package
+      # lives in the GATK sources' python dir, not on any index
+      - git+https://github.com/broadinstitute/gatk@4.5.0.0#subdirectory=src/main/python/org/broadinstitute/hellbender

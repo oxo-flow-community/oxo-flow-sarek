@@ -31,14 +31,24 @@ gatk_pcr_indel_model = "CONSERVATIVE"
 seq_platform = "ILLUMINA"
 vep_genome = "GRCh38"
 vep_species = "homo_sapiens"
-vep_cache_version = 116
+# The VEP cache version must match the VEP binary in envs/vep.yaml
+# (upstream's image pins 116; this env ships ensembl-vep 112, whose
+# cache format is version-locked — a 116 cache is unreadable).
+# The cache itself is user data (upstream bundles it in the container
+# at /.vep; ~30GB for whole-genome GRCh38, or a gtf2vep subset) —
+# the VEP rule gates on vep_cache_ready. Upstream fails hard without
+# the cache; set the flag after placing it at vep_dir_cache (see
+# README fidelity table).
+vep_cache_version = 112
+vep_dir_cache = "/.vep"
+vep_cache_ready = false
 
 # Sample metadata — mirrors tests/csv/3.0/fastq_single.csv (single-lane model:
 # nf-core/sarek meta.id = "{sample}-{lane}", read-group ID = "{sample}.{lane}")
 patient = "test"
 sex = "XX"
 status = 0
-lane = "test_L1"
+lane = "L1"
 
 # tools / skip_tools equivalents (upstream comma-list params expressed as booleans)
 call_haplotypecaller = true
@@ -69,7 +79,7 @@ known_indels_tbi = [
 
 [[sample_groups]]
 name = "cohort"
-samples = ["test"]
+samples = ["test", "test2"]
 
 # ---------------------------------------------------------------------------
 # FASTQC — nf-core/fastqc module (raw reads QC)
@@ -99,7 +109,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-docker = "quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0"
+singularity = "docker://quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0"
 
 # ---------------------------------------------------------------------------
 # FASTP — nf-core/fastp module (trim/split; upstream runs when
@@ -131,7 +141,7 @@ threads = 12
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57"
+conda = "envs/fastp.yaml"
 
 # ---------------------------------------------------------------------------
 # BWA_MEM — nf-core/bwa/mem module (aligner 'bwa-mem', upstream default;
@@ -148,8 +158,12 @@ description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-
 shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
 for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
-INDEX=$(find -L ./ -name "*.amb" | sed 's/\\.amb$//')
-bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t 24 $INDEX {input[0]} {input[1]} | samtools sort --threads 24 -o {sample}.0001.bam -
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
+# {effective_threads} + a bounded per-thread sort buffer: the upstream
+# 24-thread label over-subscribes small machines and samtools sort's
+# default 768M/thread would request ~18G (live: 'couldn't allocate
+# memory for bam_mem' on a 4G box).
+bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.0001.bam -
 mv {sample}.0001.bam {config.out_dir}/preprocessing/mapped/{sample}/
 """
 
@@ -158,7 +172,7 @@ threads = 24
 memory = "30G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/bwa_htslib_samtools:83b50ff84ead50d0"
+conda = "envs/bwa-samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_MARKDUPLICATES — nf-core/gatk4/markduplicates module
@@ -179,8 +193,12 @@ mkdir -p {config.out_dir}/preprocessing/markduplicates/{sample} {config.out_dir}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx24576M -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
-samtools view -Ch -T reference.fasta -o {sample}.md.cram {sample}.md.bam
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT
+# CRAM 3.0: the env's samtools 1.24 defaults to CRAM 3.1, which
+# GATK 4.5.0.0's bundled htsjdk cannot read (live:
+# 'java.lang.RuntimeException: CRAM version 3.1 is not supported'
+# in BaseRecalibrator)
+samtools view -Ch -T reference.fasta -O cram,version=3.0 -o {sample}.md.cram {sample}.md.bam
 rm {sample}.md.bam
 samtools index {sample}.md.cram
 mv {sample}.md.cram {sample}.md.cram.crai {config.out_dir}/preprocessing/markduplicates/{sample}/
@@ -192,7 +210,7 @@ threads = 6
 memory = "30G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel_htslib_samtools:d3becb6465454c35"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # CRAM_QC_MOSDEPTH_SAMTOOLS on MarkDuplicates output (nf-core MOSDEPTH +
@@ -221,7 +239,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_md"
@@ -241,7 +259,7 @@ threads = 1
 memory = "6G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_BASERECALIBRATOR — nf-core/gatk4/baserecalibrator module
@@ -266,7 +284,7 @@ done
 for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
     cp -L "$v" .
 done
-gatk --java-options "-Xmx3276M -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {sample}.recal.table --reference reference.fasta $SITES --tmp-dir .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {sample}.recal.table --reference reference.fasta $SITES --tmp-dir .
 mv {sample}.recal.table {config.out_dir}/preprocessing/recal_table/{sample}/
 """
 
@@ -275,7 +293,7 @@ threads = 2
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_APPLYBQSR — nf-core/gatk4/applybqsr module (output_suffix 'cram' since
@@ -294,7 +312,7 @@ mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx3276M -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
 mv {sample}.recal.cram {config.out_dir}/recalibrated/{sample}/
 """
 
@@ -303,7 +321,7 @@ threads = 2
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # CRAM_SAMPLEQC on the recalibrated CRAM: SAMTOOLS_INDEX, MOSDEPTH, SAMTOOLS_STATS
@@ -321,11 +339,17 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 [[rules]]
 name = "mosdepth_recal"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+# the .crai input is the DAG edge to samtools_index_recal — mosdepth
+# requires an indexed alignment file, and without this edge it races
+# the indexer (live: 'alignment file must be indexed')
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram.crai",
+]
 output = [
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.global.dist.txt",
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.summary.txt",
@@ -346,7 +370,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_mosdepth_gzip:4108dd38be84e40a"
+conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_recal"
@@ -366,7 +390,7 @@ threads = 1
 memory = "6G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/htslib_samtools:1.24--d697cfb9dce007cd"
+conda = "envs/samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # GATK4_HAPLOTYPECALLER — nf-core/gatk4/haplotypecaller module
@@ -388,7 +412,7 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 cp -L {config.dbsnp} {config.dbsnp_tbi} .
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model}
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model}
 mv {sample}.haplotypecaller.vcf.gz {sample}.haplotypecaller.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
 """
 
@@ -397,7 +421,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # VCF_VARIANT_FILTERING_GATK — nf-core gatk4/cnnscorevariants +
@@ -421,8 +445,14 @@ mkdir -p {config.out_dir}/variant_calling/cnnscorevariants/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-export THEANO_FLAGS="base_compiledir=$PWD"
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
+# the scoring python runs on the keras TF backend (tensorflow 1.15 in
+# envs/gatk4.yaml) — the bundled 1D model loads under TF and
+# vqsr_cnn's session API (clear_session/get_session) is TF-only. The
+# explicit export matters: a conda keras package's activation script
+# sets KERAS_BACKEND=theano on Linux, which breaks the scoring python
+# (live nack at K.get_session()).
+export KERAS_BACKEND=tensorflow
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" CNNScoreVariants --variant {input[0]} --output {sample}.cnn.vcf.gz --reference reference.fasta --tmp-dir .
 mv {sample}.cnn.vcf.gz {sample}.cnn.vcf.gz.tbi {config.out_dir}/variant_calling/cnnscorevariants/{sample}/
 """
 
@@ -431,7 +461,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 [[rules]]
 name = "gatk_filtervarianttranches"
@@ -459,7 +489,7 @@ done
 for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
     cp -L "$v" .
 done
-gatk --java-options "-Xmx9830M -XX:-UsePerfData" FilterVariantTranches --variant {input[0]} $SITES --output {sample}.haplotypecaller.filtered.vcf.gz --tmp-dir . --info-key CNN_1D
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" FilterVariantTranches --variant {input[0]} $SITES --output {sample}.haplotypecaller.filtered.vcf.gz --tmp-dir . --info-key CNN_1D
 mv {sample}.haplotypecaller.filtered.vcf.gz {sample}.haplotypecaller.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
 """
 
@@ -468,7 +498,7 @@ threads = 2
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/gatk4_gcnvkernel:edb12e4f0bf02cd3"
+conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
 # VCF_QC_BCFTOOLS_VCFTOOLS — nf-core bcftools/stats + vcftools (x3)
@@ -491,7 +521,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/bcftools_htslib:1.23.1--9f08ec665533d64a"
+conda = "envs/bcftools.yaml"
 
 [[rules]]
 name = "vcftools_tstv_count"
@@ -510,7 +540,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
 
 [[rules]]
 name = "vcftools_tstv_qual"
@@ -529,7 +559,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
 
 [[rules]]
 name = "vcftools_filter_summary"
@@ -548,7 +578,7 @@ threads = 1
 memory = "1G"
 
 [rules.environment]
-docker = "quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
 
 # ---------------------------------------------------------------------------
 # ENSEMBLVEP_VEP — nf-core/ensemblvep/vep module
@@ -564,11 +594,11 @@ output = [
   "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi",
   "{config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.summary.html",
 ]
-description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at /.vep in the container)"
-when = "config.call_haplotypecaller && config.annotate_vep"
+description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_haplotypecaller && config.annotate_vep && config.vep_cache_ready"
 shell = """
 mkdir -p {config.out_dir}/annotation/haplotypecaller/{sample} {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}
-vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache /.vep --fork 6
+vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
 tabix {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz
 mv {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/{sample}/
 mv {sample}.haplotypecaller.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/
@@ -579,7 +609,7 @@ threads = 6
 memory = "36G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/ensembl-vep_perl-math-cdf_htslib:c4edd3fb4a233ae6"
+conda = "envs/vep.yaml"
 
 # ---------------------------------------------------------------------------
 # MULTIQC — nf-core/multiqc module; scans the results directory with the
@@ -619,4 +649,4 @@ threads = 4
 memory = "12G"
 
 [rules.environment]
-docker = "community.wave.seqera.io/library/multiqc:1.35--c17fb751507e9dfc"
+conda = "envs/multiqc.yaml"
