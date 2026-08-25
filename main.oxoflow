@@ -1,12 +1,25 @@
-# oxo-flow-sarek — WGS/WES germline and somatic variant calling
+# oxo-flow-sarek — WGS/WES germline variant calling
 # oxo-flow port of nf-core/sarek @ 3.10.0 (default-parameters main execution path).
 #
-# Ported 2026-08-15. See README.md fidelity table for the exact upstream
-# mapping and every deviation. Upstream default path reproduced here:
+# Ported 2026-08-15, expanded 2026-08-26. See README.md fidelity table for the
+# exact upstream mapping and every deviation. Upstream default path reproduced here:
 #   FASTQC -> FASTP -> BWA_MEM -> GATK4_MARKDUPLICATES -> (mosdepth + samtools stats)
 #   -> GATK4_BASERECALIBRATOR -> GATK4_APPLYBQSR -> (index + mosdepth + samtools stats)
 #   -> GATK4_HAPLOTYPECALLER -> GATK4_CNNSCOREVARIANTS -> GATK4_FILTERVARIANTTRANCHES
 #   -> (bcftools stats + vcftools x3) -> ENSEMBLVEP_VEP -> MULTIQC
+#
+# Optional upstream branches ported alongside the default path (all gated by
+# config booleans, see README fidelity table):
+#   PREPARE_GENOME reference building (bwa / bwa-mem2 index, dict, faidx),
+#   aligner 'bwa-mem2', save_output_as_bam=true (BAM branch of MarkDuplicates),
+#   UMI consensus preprocessing (fgbio FastqToBam -> GroupReadsByUmi ->
+#   CallMolecularConsensusReads -> fastp), optional callers FreeBayes, Strelka2,
+#   Manta, bcftools mpileup, TIDDIT, goleft indexcov (WGS only), DeepVariant,
+#   NGSCheckMate, and joint germline genotyping (GenomicsDBImport ->
+#   GenotypeGVCFs -> MergeVcfs -> VQSR SNP+INDEL -> ApplyVQSR -> QC + VEP).
+#
+# Engine note: cohort-level rules (multiqc pattern) use input = [] + depends_on
+# and glob the results directory; per-sample callers use explicit input edges.
 
 [workflow]
 name = "oxo-flow-sarek"
@@ -77,9 +90,154 @@ known_indels_tbi = [
   "/data/references/GRCh38/Annotation/GATKBundle/Homo_sapiens_assembly38.known_indels.vcf.gz.tbi",
 ]
 
+# Optional branches (all default-off; upstream equivalents in parentheses)
+# ---------------------------------------------------------------------------
+# Reference preparation — upstream PREPARE_GENOME builds the BWA/BWAmem2
+# indexes + .dict + .fai when the reference lacks them; the port gates this on
+# prepare_reference and writes into results/reference/. Point bwa_index_dir /
+# bwa_mem2_index_dir / fasta_fai / dict at the built files to use them.
+prepare_reference = false
+bwa_mem2_index_dir = "/data/references/GRCh38/Sequence/BWAmem2Index/"
+
+# Optional callers (upstream --tools list, one boolean per tool)
+call_freebayes = false
+call_strelka = false
+call_manta = false
+call_mpileup = false
+call_tiddit = false
+call_indexcov = false       # upstream runs indexcov on WGS only (germline)
+call_deepvariant = false
+tools_ngscheckmate = false
+freebayes_filter = 30        # upstream params.freebayes_filter
+ngscheckmate_bed = "/data/references/GRCh38/Annotation/NGSCheckMate/SNP_GRCh38_hg38_wChr.bed"
+
+# VQSR resources for joint germline (upstream conf/igenomes.config known_snps)
+known_snps = "/data/references/GRCh38/Annotation/GATKBundle/1000G_omni2.5.hg38.vcf.gz"
+known_snps_tbi = "/data/references/GRCh38/Annotation/GATKBundle/1000G_omni2.5.hg38.vcf.gz.tbi"
+
+# Alignment-file mode: 'cram' (default) or 'bam' (when save_output_as_bam=true).
+# recal_index_ext must match the mode ('cram.crai' vs 'bam.bai').
+alignment_ext = "cram"
+recal_index_ext = "cram.crai"
+
+# UMI consensus preprocessing (upstream params.umi_read_structure, e.g.
+# '3M2S+T' or '5M2S+T'; empty string disables the whole UMI chain)
+umi_read_structure = ""
+group_by_umi_strategy = "Adjacency"   # upstream params.group_by_umi_strategy
+
+# Joint germline: the port runs without interval scatter; a single whole-genome
+# interval is built from the fasta .fai (upstream: per-contig BED_PREPARE_INTERVALS)
+joint_interval_name = "whole_genome"
+
 [[sample_groups]]
 name = "cohort"
 samples = ["test", "test2"]
+
+# ---------------------------------------------------------------------------
+# Reference preparation — upstream subworkflows/local/prepare_genome (runs
+# when the reference files are not provided). The port gates all four on
+# prepare_reference; outputs land in results/reference/ with fixed names
+# (upstream uses the fasta basename; the bwa/bwa-mem2 rules find the index
+# by extension, so the prefix is irrelevant). No engine DAG edges: the
+# consuming rules read config.bwa_index_dir / fasta_fai / dict directly.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_index"
+input = ["{config.fasta}"]
+output = [
+  "{config.out_dir}/reference/bwa/index.amb",
+  "{config.out_dir}/reference/bwa/index.ann",
+  "{config.out_dir}/reference/bwa/index.bwt",
+  "{config.out_dir}/reference/bwa/index.pac",
+  "{config.out_dir}/reference/bwa/index.sa",
+]
+description = "BWA index of the reference fasta (nf-core BWA_INDEX; upstream prefix = fasta basename, port uses fixed 'index' — see README)"
+when = "config.prepare_reference"
+log = "logs/bwa_index.log"
+shell = """
+mkdir -p {config.out_dir}/reference/bwa
+bwa index -p bwa/index {config.fasta}
+mv bwa/index.amb bwa/index.ann bwa/index.bwt bwa/index.pac bwa/index.sa {config.out_dir}/reference/bwa/
+"""
+
+[rules.resources]
+threads = 1
+memory = "24G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/bwa_htslib_samtools:83b50ff84ead50d0"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwamem2_index"
+input = ["{config.fasta}"]
+output = [
+  "{config.out_dir}/reference/bwamem2/index.0123",
+  "{config.out_dir}/reference/bwamem2/index.amb",
+  "{config.out_dir}/reference/bwamem2/index.ann",
+  "{config.out_dir}/reference/bwamem2/index.bwt.2bit.64",
+  "{config.out_dir}/reference/bwamem2/index.pac",
+]
+description = "BWA-MEM2 index of the reference fasta (nf-core BWAMEM2_INDEX; fixed 'index' prefix, see README)"
+when = "config.prepare_reference"
+log = "logs/bwamem2_index.log"
+shell = """
+mkdir -p {config.out_dir}/reference/bwamem2
+bwa-mem2 index -p bwamem2/index {config.fasta}
+mv bwamem2/index.0123 bwamem2/index.amb bwamem2/index.ann bwamem2/index.bwt.2bit.64 bwamem2/index.pac {config.out_dir}/reference/bwamem2/
+"""
+
+[rules.resources]
+threads = 1
+memory = "36G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/bwa-mem2_htslib_samtools:db98f81f55b64113"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_createsequencedictionary"
+input = ["{config.fasta}"]
+output = ["{config.out_dir}/reference/dict/reference.dict"]
+description = "GATK CreateSequenceDictionary for the reference (nf-core GATK4_CREATESEQUENCEDICTIONARY; GATK writes <fasta-basename>.dict, the port renames to reference.dict — see README)"
+when = "config.prepare_reference"
+log = "logs/gatk_createsequencedictionary.log"
+shell = """
+mkdir -p {config.out_dir}/reference/dict
+DICT=$(basename {config.fasta} | sed 's/\\.[^.]*$//').dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" CreateSequenceDictionary --REFERENCE {config.fasta} --URI $(basename {config.fasta}) --TMP_DIR .
+mv "$DICT" reference.dict
+mv reference.dict {config.out_dir}/reference/dict/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "samtools_faidx"
+input = ["{config.fasta}"]
+output = ["{config.out_dir}/reference/fai/reference.fasta.fai"]
+description = "Samtools faidx index of the reference (nf-core SAMTOOLS_FAIDX; copied to a local name — the original /data path is read-only)"
+when = "config.prepare_reference"
+log = "logs/samtools_faidx.log"
+shell = """
+mkdir -p {config.out_dir}/reference/fai
+cp -L {config.fasta} ./reference.fasta
+samtools faidx reference.fasta
+mv reference.fasta.fai {config.out_dir}/reference/fai/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
 
 # ---------------------------------------------------------------------------
 # FASTQC — nf-core/fastqc module (raw reads QC)
@@ -126,10 +284,195 @@ output = [
   "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.log",
 ]
 description = "Read trimming and splitting (nf-core FASTP; --split_by_lines = 4 x split_fastq)"
-when = "config.trim_fastq || config.split_fastq > 0"
+when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure == ''"
 shell = """
 [ ! -f  {sample}-{config.lane}_R1.fastq.gz ] && ln -sf raw/{sample}_R1.fastq.gz {sample}-{config.lane}_R1.fastq.gz
 [ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
+fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
+mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
+mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "4G"
+
+[rules.environment]
+conda = "envs/fastp.yaml"
+
+# ---------------------------------------------------------------------------
+# UMI consensus preprocessing — upstream subworkflows/local/
+# fastq_create_umi_consensus_fgbio (params.umi_read_structure set):
+#   FGBIO_FASTQTOBAM -> SAMTOOLS_BAM2FQ_UMI -> BWA_MEM_UMI (unsorted)
+#   -> FGBIO_GROUPREADSBYUMI -> FGBIO_CALLMOLECULARCONSENSUSREADS
+#   -> SAMTOOLS_BAM2FQ_CONSENSUS -> fastp_umi (same outputs as fastp).
+# The upstream BAM_CONVERT_SAMTOOLS step (4-way view -> merge -> collate)
+# doubles reads at this commit (no distinguishing -f/-F flags anywhere in
+# conf/) — the port uses a single `samtools collate -O | samtools fastq`
+# instead (documented deviation, see README).
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fgbio_fastqtobam"
+input = ["raw/{sample}_R1.fastq.gz", "raw/{sample}_R2.fastq.gz"]
+output = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}.bam"]
+description = "fgbio FastqToBam: tag reads with UMI structures (nf-core FGBIO_FASTQTOBAM, --read-structures from umi_read_structure)"
+when = "config.umi_read_structure != ''"
+log = "logs/fgbio_fastqtobam.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample}
+fgbio -Xmx{effective_memory_mb}m --tmp-dir=. --async-io=true FastqToBam --read-structures {config.umi_read_structure} --input raw/{sample}_R1.fastq.gz raw/{sample}_R2.fastq.gz --output {sample}-{config.lane}.bam --sample {sample}-{config.lane} --library {sample}-{config.lane}
+mv {sample}-{config.lane}.bam {config.out_dir}/preprocessing/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/fgbio:3.1.2--6e9400d507a9dc55"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "samtools_bam2fq_umi"
+input = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}.bam"]
+output = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_interleaved.fq.gz"]
+description = "Samtools bam2fq: interleaved reads with RX UMI tags (nf-core SAMTOOLS_BAM2FQ)"
+when = "config.umi_read_structure != ''"
+log = "logs/samtools_bam2fq_umi.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample}
+samtools bam2fq -T RX -@ 1 {input[0]} | bgzip > {sample}-{config.lane}_interleaved.fq.gz
+mv {sample}-{config.lane}_interleaved.fq.gz {config.out_dir}/preprocessing/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_mem_umi"
+input = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_interleaved.fq.gz"]
+output = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}.umi_unsorted.bam"]
+description = "BWA-MEM on UMI-tagged interleaved reads, unsorted (nf-core BWA_MEM with -p -C -Y; ext.args '-K 100000000', no sort step upstream)"
+when = "config.umi_read_structure != ''"
+log = "logs/bwa_mem_umi.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample}
+for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
+bwa mem -K 100000000 -p -C -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} | samtools view -bS -@ {effective_threads} -o {sample}.umi_unsorted.bam -
+mv {sample}.umi_unsorted.bam {config.out_dir}/preprocessing/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 24
+memory = "30G"
+
+[rules.environment]
+conda = "envs/bwa-samtools.yaml"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fgbio_groupreadsbyumi"
+input = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}.umi_unsorted.bam"]
+output = [
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_umi-grouped.bam",
+  "{config.out_dir}/reports/umi/{sample}/{sample}-{config.lane}_umi-grouped_histogram.txt",
+  "{config.out_dir}/reports/umi/{sample}/{sample}-{config.lane}_umi-grouped_read-metrics.txt",
+]
+description = "fgbio GroupReadsByUmi (nf-core FGBIO_GROUPREADSBYUMI, -s from group_by_umi_strategy; grouped BAM is intermediate upstream — the port keeps it under results/ for DAG handoff)"
+when = "config.umi_read_structure != ''"
+log = "logs/fgbio_groupreadsbyumi.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample} {config.out_dir}/reports/umi/{sample}
+fgbio -Xmx{effective_memory_mb}m --tmp-dir=. GroupReadsByUmi -s {config.group_by_umi_strategy} -i {input[0]} -o {sample}-{config.lane}_umi-grouped.bam -f {sample}-{config.lane}_umi-grouped_histogram.txt --grouping-metrics {sample}-{config.lane}_umi-grouped_read-metrics.txt
+mv {sample}-{config.lane}_umi-grouped.bam {config.out_dir}/preprocessing/umi/{sample}/
+mv {sample}-{config.lane}_umi-grouped_histogram.txt {sample}-{config.lane}_umi-grouped_read-metrics.txt {config.out_dir}/reports/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/fgbio:3.1.2--6e9400d507a9dc55"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fgbio_callmolecularconsensusreads"
+input = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_umi-grouped.bam"]
+output = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_umi-consensus.bam"]
+description = "fgbio CallMolecularConsensusReads (nf-core FGBIO_CALLMOLECULARCONSENSUSREADS, -S Coordinate --min-reads 1 --min-input-base-quality 10)"
+when = "config.umi_read_structure != ''"
+log = "logs/fgbio_callmolecularconsensusreads.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample}
+fgbio -Xmx{effective_memory_mb}m --tmp-dir=. --async-io=true --compression=1 CallMolecularConsensusReads --input {input[0]} --output {sample}-{config.lane}_umi-consensus.bam --min-reads 1 --min-input-base-quality 10 --threads {effective_threads} -S Coordinate
+mv {sample}-{config.lane}_umi-consensus.bam {config.out_dir}/preprocessing/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "12G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/fgbio:3.1.2--6e9400d507a9dc55"
+
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "samtools_bam2fq_consensus"
+input = ["{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_umi-consensus.bam"]
+output = [
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_other.fq.gz",
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_1.fq.gz",
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_2.fq.gz",
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_singleton.fq.gz",
+]
+description = "Samtools collate + fastq on consensus reads (upstream BAM_CONVERT_SAMTOOLS intent, single collate+fastq — see section note)"
+when = "config.umi_read_structure != ''"
+log = "logs/samtools_bam2fq_consensus.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/umi/{sample}
+samtools collate -@ 1 -O {input[0]} . | samtools fastq -@ 1 -0 {sample}-{config.lane}_other.fq.gz -1 {sample}-{config.lane}_1.fq.gz -2 {sample}-{config.lane}_2.fq.gz -s {sample}-{config.lane}_singleton.fq.gz
+mv {sample}-{config.lane}_other.fq.gz {sample}-{config.lane}_1.fq.gz {sample}-{config.lane}_2.fq.gz {sample}-{config.lane}_singleton.fq.gz {config.out_dir}/preprocessing/umi/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+# ---------------------------------------------------------------------------
+# fastp on consensus reads — mirrors the fastp rule (same output paths, so
+# bwa_mem downstream is unchanged); upstream runs fastp after UMI consensus
+# with the same params.trim_fastq / split_fastq gate.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fastp_umi"
+input = [
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_1.fq.gz",
+  "{config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_2.fq.gz",
+]
+output = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.json",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.html",
+  "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.log",
+]
+description = "Read trimming and splitting of UMI consensus reads (nf-core FASTP on the consensus pair; outputs shared with the fastp rule — the two are mutually exclusive via when)"
+when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure != ''"
+log = "logs/fastp_umi.log"
+shell = """
+[ ! -f {sample}-{config.lane}_R1.fastq.gz ] && ln -sf {config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_1.fq.gz {sample}-{config.lane}_R1.fastq.gz
+[ ! -f {sample}-{config.lane}_R2.fastq.gz ] && ln -sf {config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_2.fq.gz {sample}-{config.lane}_R2.fastq.gz
 fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
 mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
 mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
@@ -155,6 +498,7 @@ input = [
 ]
 output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
 description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-K 100000000 -Y -R <read_group>')"
+when = "config.aligner == 'bwa-mem'"
 shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
 for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
@@ -175,6 +519,36 @@ memory = "30G"
 conda = "envs/bwa-samtools.yaml"
 
 # ---------------------------------------------------------------------------
+# BWA_MEM2 — nf-core/bwamem2/mem module (aligner 'bwa-mem2'; same args as
+# BWA_MEM, index from bwa_mem2_index_dir; shares bwa_mem's output path so
+# all downstream rules are unchanged — the two are mutually exclusive via when)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_mem2"
+input = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
+]
+output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+description = "BWA-MEM2 alignment + coordinate sort (nf-core BWAMEM2_MEM, ext.args '-K 100000000 -Y -R <read_group>')"
+when = "config.aligner == 'bwa-mem2'"
+log = "logs/bwa_mem2.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
+for f in {config.bwa_mem2_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
+bwa-mem2 mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.0001.bam -
+mv {sample}.0001.bam {config.out_dir}/preprocessing/mapped/{sample}/
+"""
+
+[rules.resources]
+threads = 24
+memory = "30G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/bwa-mem2_htslib_samtools:db98f81f55b64113"
+
+# ---------------------------------------------------------------------------
 # GATK4_MARKDUPLICATES — nf-core/gatk4/markduplicates module
 # (ext.args '--REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT',
 # ext.prefix '{meta.id}.md.cram', CRAM conversion via samtools)
@@ -188,6 +562,7 @@ output = [
   "{config.out_dir}/reports/markduplicates/{sample}/{sample}.md.metrics",
 ]
 description = "Mark duplicates with GATK4 MarkDuplicates and convert to CRAM (nf-core GATK4_MARKDUPLICATES)"
+when = "!config.save_output_as_bam"
 shell = """
 mkdir -p {config.out_dir}/preprocessing/markduplicates/{sample} {config.out_dir}/reports/markduplicates/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -213,12 +588,47 @@ memory = "30G"
 conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
+# GATK4_MARKDUPLICATES (BAM branch, params.save_output_as_bam=true) — same
+# module with --CREATE_INDEX true; picard writes {sample}.md.bai which is
+# renamed to {sample}.md.bam.bai (upstream BAM_MERGE_INDEX_SAMTOOLS). All
+# downstream rules consume {config.alignment_ext}-parameterized paths.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_markduplicates_bam"
+input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+output = [
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.bam",
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.bam.bai",
+  "{config.out_dir}/reports/markduplicates/{sample}/{sample}.md.metrics",
+]
+description = "Mark duplicates with GATK4 MarkDuplicates, BAM output with index (nf-core GATK4_MARKDUPLICATES, --CREATE_INDEX true; save_output_as_bam=true branch)"
+when = "config.save_output_as_bam"
+log = "logs/gatk_markduplicates_bam.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/markduplicates/{sample} {config.out_dir}/reports/markduplicates/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MarkDuplicates --INPUT {input[0]} --OUTPUT {sample}.md.bam --METRICS_FILE {sample}.md.metrics --TMP_DIR . --REFERENCE_SEQUENCE reference.fasta --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
+mv {sample}.md.bai {sample}.md.bam.bai
+mv {sample}.md.bam {sample}.md.bam.bai {config.out_dir}/preprocessing/markduplicates/{sample}/
+mv {sample}.md.metrics {config.out_dir}/reports/markduplicates/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "30G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# ---------------------------------------------------------------------------
 # CRAM_QC_MOSDEPTH_SAMTOOLS on MarkDuplicates output (nf-core MOSDEPTH +
 # SAMTOOLS_STATS; ext.prefix '{meta.id}.md')
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "mosdepth_md"
-input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}"]
 output = [
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.mosdepth.global.dist.txt",
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.mosdepth.summary.txt",
@@ -243,15 +653,15 @@ conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_md"
-input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
-output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.md.cram.stats"]
-description = "Samtools stats on MarkDuplicates CRAM (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.md.cram')"
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}"]
+output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.md.{config.alignment_ext}.stats"]
+description = "Samtools stats on MarkDuplicates alignment (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.md.{alignment_ext}')"
 when = "!config.skip_samtools"
 shell = """
 mkdir -p {config.out_dir}/reports/samtools/{sample}
 cp -L {config.fasta} ./reference.fasta
-samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.md.cram.stats
-mv {sample}.md.cram.stats {config.out_dir}/reports/samtools/{sample}/
+samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.md.{config.alignment_ext}.stats
+mv {sample}.md.{config.alignment_ext}.stats {config.out_dir}/reports/samtools/{sample}/
 """
 
 [rules.resources]
@@ -267,7 +677,7 @@ conda = "envs/samtools.yaml"
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "gatk_baserecalibrator"
-input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram"]
+input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}"]
 output = ["{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table"]
 description = "Base quality score recalibration table (nf-core GATK4_BASERECALIBRATOR)"
 shell = """
@@ -302,18 +712,18 @@ conda = "envs/gatk4.yaml"
 [[rules]]
 name = "gatk_applybqsr"
 input = [
-  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram",
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}",
   "{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table",
 ]
-output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
-description = "Apply base quality score recalibration to CRAM (nf-core GATK4_APPLYBQSR)"
+output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+description = "Apply base quality score recalibration to the alignment file (nf-core GATK4_APPLYBQSR)"
 shell = """
 mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.cram --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
-mv {sample}.recal.cram {config.out_dir}/recalibrated/{sample}/
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.{config.alignment_ext} --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
+mv {sample}.recal.{config.alignment_ext} {config.out_dir}/recalibrated/{sample}/
 """
 
 [rules.resources]
@@ -329,9 +739,9 @@ conda = "envs/gatk4.yaml"
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "samtools_index_recal"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
-output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram.crai"]
-description = "Index recalibrated CRAM (nf-core SAMTOOLS_INDEX)"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}"]
+description = "Index recalibrated alignment file (nf-core SAMTOOLS_INDEX)"
 shell = "samtools index -@ 1 {input[0]}"
 
 [rules.resources]
@@ -347,8 +757,8 @@ name = "mosdepth_recal"
 # requires an indexed alignment file, and without this edge it races
 # the indexer (live: 'alignment file must be indexed')
 input = [
-  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram",
-  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram.crai",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
 ]
 output = [
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.recal.mosdepth.global.dist.txt",
@@ -374,15 +784,15 @@ conda = "envs/mosdepth.yaml"
 
 [[rules]]
 name = "samtools_stats_recal"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
-output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.recal.cram.stats"]
-description = "Samtools stats on recalibrated CRAM (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.recal.cram')"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = ["{config.out_dir}/reports/samtools/{sample}/{sample}.recal.{config.alignment_ext}.stats"]
+description = "Samtools stats on recalibrated alignment (nf-core SAMTOOLS_STATS, ext.prefix '{meta.id}.recal.{alignment_ext}')"
 when = "!config.skip_samtools"
 shell = """
 mkdir -p {config.out_dir}/reports/samtools/{sample}
 cp -L {config.fasta} ./reference.fasta
-samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.recal.cram.stats
-mv {sample}.recal.cram.stats {config.out_dir}/reports/samtools/{sample}/
+samtools stats --threads 1 --reference reference.fasta {input[0]} > {sample}.recal.{config.alignment_ext}.stats
+mv {sample}.recal.{config.alignment_ext}.stats {config.out_dir}/reports/samtools/{sample}/
 """
 
 [rules.resources]
@@ -399,13 +809,13 @@ conda = "envs/samtools.yaml"
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "gatk_haplotypecaller"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.cram"]
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
 output = [
   "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz",
   "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz.tbi",
 ]
-description = "Germline variant calling with GATK4 HaplotypeCaller (nf-core GATK4_HAPLOTYPECALLER)"
-when = "config.call_haplotypecaller"
+description = "Germline variant calling with GATK4 HaplotypeCaller (nf-core GATK4_HAPLOTYPECALLER; joint_germline=false branch — GVCF mode is gatk_haplotypecaller_gvcf)"
+when = "config.call_haplotypecaller && !config.joint_germline"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -439,7 +849,7 @@ output = [
   "{config.out_dir}/variant_calling/cnnscorevariants/{sample}/{sample}.cnn.vcf.gz.tbi",
 ]
 description = "CNN 1D variant score annotation (nf-core GATK4_CNNSCOREVARIANTS, default --tensor-type 1D; upstream publishDir is disabled — the port keeps this intermediate under results/ for DAG handoff)"
-when = "config.call_haplotypecaller"
+when = "config.call_haplotypecaller && !config.joint_germline"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/cnnscorevariants/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -474,7 +884,7 @@ output = [
   "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz.tbi",
 ]
 description = "Tranche filtering of CNN-scored variants (nf-core GATK4_FILTERVARIANTTRANCHES, ext.args '--info-key CNN_1D', ext.prefix '{sample}.haplotypecaller'; known sites as --resource)"
-when = "config.call_haplotypecaller"
+when = "config.call_haplotypecaller && !config.joint_germline"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -501,6 +911,420 @@ memory = "12G"
 conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
+# Optional callers — upstream subworkflows/local/bam_variant_calling_*
+# (each gated by its call_* boolean; all consume the recalibrated alignment).
+# VCF_QC and VEP remain haplotypecaller-scoped (see README fidelity table);
+# multiqc depends_on below lists every report producer.
+# ---------------------------------------------------------------------------
+
+# FreeBayes germline (upstream BAM_VARIANT_CALLING_FREEBAYES:
+# FREEBAYES_GERMLINE -> BCFTOOLS_SORT_FREEBAYES -> TABIX_VC_FREEBAYES
+# -> VCFLIB_VCF_FILTER_FREEBAYES -> TABIX_FREEBAYES_FILT)
+[[rules]]
+name = "freebayes"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.vcf.gz"]
+description = "FreeBayes germline variant calling (nf-core FREEBAYES, ext.args '--min-alternate-fraction 0.1 --min-mapping-quality 1'; bgzip'ed in-module)"
+when = "config.call_freebayes"
+log = "logs/freebayes.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+freebayes -f reference.fasta --min-alternate-fraction 0.1 --min-mapping-quality 1 {input[0]} > {sample}.vcf
+bgzip {sample}.vcf
+mv {sample}.vcf.gz {config.out_dir}/variant_calling/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "8G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/freebayes:1.3.10--hbefcdb2_0"
+
+[[rules]]
+name = "bcftools_sort_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.vcf.gz"]
+description = "Sort FreeBayes VCF with bcftools (nf-core BCFTOOLS_SORT, ext.prefix '{meta.id}.freebayes')"
+when = "config.call_freebayes"
+log = "logs/bcftools_sort_freebayes.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
+bcftools sort --output {sample}.freebayes.vcf.gz --temp-dir . --output-type z {input[0]}
+mv {sample}.freebayes.vcf.gz {config.out_dir}/variant_calling/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "tabix_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.vcf.gz.tbi"]
+description = "Index the sorted FreeBayes VCF (nf-core TABIX_VC_FREEBAYES, bgziptabix compress + tabix)"
+when = "config.call_freebayes"
+log = "logs/tabix_freebayes.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
+tabix -p vcf -f {sample}.freebayes.vcf.gz
+mv {sample}.freebayes.vcf.gz.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+[[rules]]
+name = "vcffilter_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+description = "Filter FreeBayes VCF by QUAL (nf-core VCFLIB_VCF_FILTER_FREEBAYES, '--info-filter QUAL > freebayes_filter'; bgzip in-module)"
+when = "config.call_freebayes"
+log = "logs/vcffilter_freebayes.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
+vcffilter --info-filter 'QUAL > {config.freebayes_filter}' {input[0]} | bgzip -c > {sample}.freebayes.filtered.vcf.gz
+mv {sample}.freebayes.filtered.vcf.gz {config.out_dir}/variant_calling/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/vcflib:1.0.14--cc8ffb2c1a080797"
+
+[[rules]]
+name = "tabix_freebayes_filt"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz.tbi"]
+description = "Index the filtered FreeBayes VCF (nf-core TABIX_FREEBAYES_FILT)"
+when = "config.call_freebayes"
+log = "logs/tabix_freebayes_filt.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
+tabix -p vcf -f {sample}.freebayes.filtered.vcf.gz
+mv {sample}.freebayes.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+# Strelka2 germline (upstream BAM_VARIANT_CALLING_SINGLE_STRELKA)
+[[rules]]
+name = "strelka_germline"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.genome.SNP.vcf.gz",
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.genome.SNP.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.genome.INDEL.vcf.gz",
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.genome.INDEL.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz",
+  "{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz.tbi",
+]
+description = "Strelka2 germline variant calling (nf-core STRELKA_GERMLINE; ext.prefix '{meta.id}.strelka'; email-check disabled via sed)"
+when = "config.call_strelka"
+log = "logs/strelka_germline.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/strelka/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+configureStrelkaGermlineWorkflow.py --bam {input[0]} --referenceFasta reference.fasta --runDir strelka
+sed -i s/"isEmail = isLocalSmtp()"/"isEmail = False"/g strelka/runWorkflow.py
+python strelka/runWorkflow.py -m local -j {effective_threads}
+mv strelka/results/variants/genome.SNP.vcf.gz {sample}.strelka.genome.SNP.vcf.gz
+mv strelka/results/variants/genome.SNP.vcf.gz.tbi {sample}.strelka.genome.SNP.vcf.gz.tbi
+mv strelka/results/variants/genome.INDEL.vcf.gz {sample}.strelka.genome.INDEL.vcf.gz
+mv strelka/results/variants/genome.INDEL.vcf.gz.tbi {sample}.strelka.genome.INDEL.vcf.gz.tbi
+mv strelka/results/variants/variants.vcf.gz {sample}.strelka.variants.vcf.gz
+mv strelka/results/variants/variants.vcf.gz.tbi {sample}.strelka.variants.vcf.gz.tbi
+mv {sample}.strelka.*.vcf.gz* {config.out_dir}/variant_calling/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "24G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/strelka:2.9.10--h9ee0642_1"
+
+# Manta germline (upstream BAM_VARIANT_CALLING_GERMLINE_MANTA; only the
+# diploid SV calls are published upstream — candidates stay in the workdir)
+[[rules]]
+name = "manta_germline"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz",
+  "{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz.tbi",
+]
+description = "Manta germline structural variant calling (nf-core MANTA_GERMLINE; ext.prefix '{meta.id}.manta'; only diploid_sv published upstream)"
+when = "config.call_manta"
+log = "logs/manta_germline.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/manta/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+configManta.py --bam {input[0]} --reference reference.fasta --runDir manta
+python manta/runWorkflow.py -m local -j {effective_threads}
+mv manta/results/variants/diploidSV.vcf.gz {sample}.manta.diploid_sv.vcf.gz
+mv manta/results/variants/diploidSV.vcf.gz.tbi {sample}.manta.diploid_sv.vcf.gz.tbi
+mv {sample}.manta.diploid_sv.vcf.gz* {config.out_dir}/variant_calling/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "24G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/manta_python:0eb71149179b3920"
+
+# bcftools mpileup + call (upstream BAM_VARIANT_CALLING_MPILEUP; the
+# in-module bcftools stats file is not published upstream and stays in the
+# workdir here too)
+[[rules]]
+name = "bcftools_mpileup_call"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz",
+  "{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz.tbi",
+]
+description = "Germline variant calling with bcftools mpileup + call (nf-core BCFTOOLS_MPILEUP, ext.args '--output-type v --multiallelic-caller', filter 'count(GT==\"RR\")==0')"
+when = "config.call_mpileup"
+log = "logs/bcftools_mpileup_call.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/bcftools/{sample}
+cp -L {config.fasta} ./reference.fasta
+echo "{sample}" > sample_name.list
+bcftools mpileup --fasta-ref reference.fasta {input[0]} | bcftools call --output-type v --multiallelic-caller | bcftools reheader --samples sample_name.list | bcftools view --output-file {sample}.bcftools.vcf.gz --output-type z -i 'count(GT=="RR")==0'
+tabix -p vcf -f {sample}.bcftools.vcf.gz
+bcftools stats {sample}.bcftools.vcf.gz > {sample}.bcftools.bcftools_stats.txt
+mv {sample}.bcftools.vcf.gz {sample}.bcftools.vcf.gz.tbi {config.out_dir}/variant_calling/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+# TIDDIT structural variants (upstream BAM_VARIANT_CALLING_SINGLE_TIDDIT +
+# TABIX_BGZIP_TIDDIT_SV; germline runs with --skip_assembly — upstream
+# passes an empty bwa index channel)
+[[rules]]
+name = "tiddit_sv"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf",
+  "{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.ploidies.tab",
+]
+description = "TIDDIT structural variant calling (nf-core TIDDIT_SV, --skip_assembly for germline; ext.prefix '{meta.id}.tiddit')"
+when = "config.call_tiddit"
+log = "logs/tiddit_sv.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/tiddit/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+tiddit --sv --skip_assembly --threads {effective_threads} --bam {input[0]} --ref reference.fasta -o {sample}.tiddit
+mv {sample}.tiddit.vcf {sample}.tiddit.ploidies.tab {config.out_dir}/variant_calling/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 8
+memory = "16G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/tiddit:3.9.5--3fb6c287f34e6ab0"
+
+[[rules]]
+name = "tabix_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = [
+  "{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf.gz",
+  "{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf.gz.tbi",
+]
+description = "Compress and index the TIDDIT VCF (nf-core TABIX_BGZIP_TIDDIT_SV)"
+when = "config.call_tiddit"
+log = "logs/tabix_tiddit.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/tiddit/{sample}
+bgzip -c -@ 1 {input[0]} > {sample}.tiddit.vcf.gz
+tabix -p vcf -f {sample}.tiddit.vcf.gz
+mv {sample}.tiddit.vcf.gz {sample}.tiddit.vcf.gz.tbi {config.out_dir}/variant_calling/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+# goleft indexcov (upstream BAM_VARIANT_CALLING_INDEXCOV, WGS only): per-sample
+# samtools reindex (header-only BAM + --write-index pass over /dev/null) then
+# the cohort goleft indexcov run. Upstream passes the .crai filter — the port
+# reindexes to BAM/BAM-index pairs, so --extranormalize does not apply.
+[[rules]]
+name = "samtools_reindex_bam"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/indexcov/reindex/{sample}/{sample}.reindex.bam",
+  "{config.out_dir}/variant_calling/indexcov/reindex/{sample}/{sample}.reindex.bam.bai",
+]
+description = "Samtools reindex pass for goleft indexcov (nf-core SAMTOOLS_REINDEX_BAM, args ' -F 3844 -q 30 '; internal — published neither upstream nor here)"
+when = "!config.wes && config.call_indexcov"
+log = "logs/samtools_reindex_bam.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/indexcov/reindex/{sample}
+cp -L {config.fasta} ./reference.fasta
+samtools view --header-only --threads 1 -O BAM -o {sample}.reindex.bam --reference reference.fasta {input[0]}
+samtools view --uncompressed --write-index --threads 1 -O BAM -o /dev/null##idx##{sample}.reindex.bam.bai --reference reference.fasta -F 3844 -q 30 {input[0]}
+mv {sample}.reindex.bam {sample}.reindex.bam.bai {config.out_dir}/variant_calling/indexcov/reindex/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+[[rules]]
+name = "goleft_indexcov"
+input = []
+depends_on = ["samtools_reindex_bam"]
+output = [
+  "{config.out_dir}/variant_calling/indexcov/indexcov/indexcov-indexcov.bed.gz",
+  "{config.out_dir}/variant_calling/indexcov/indexcov/indexcov-indexcov.bed.gz.tbi",
+]
+description = "Cohort coverage-index with goleft indexcov (nf-core GOLEFT_INDEXCOV, --fai --directory indexcov; WGS only upstream)"
+when = "!config.wes && config.call_indexcov"
+log = "logs/goleft_indexcov.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/indexcov/indexcov
+cp -L {config.fasta_fai} ./reference.fasta.fai
+for b in {config.out_dir}/variant_calling/indexcov/reindex/*/*.reindex.bam; do cp -L "$b" .; done
+goleft indexcov --fai reference.fasta.fai --directory indexcov -- *.reindex.bam
+mv indexcov/indexcov-indexcov.bed.gz indexcov/indexcov-indexcov.bed.gz.tbi {config.out_dir}/variant_calling/indexcov/indexcov/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/goleft:0.2.4--h9ee0642_1"
+
+# DeepVariant (upstream BAM_VARIANT_CALLING_DEEPVARIANT; WGS model)
+[[rules]]
+name = "deepvariant"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz",
+  "{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.g.vcf.gz",
+  "{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.g.vcf.gz.tbi",
+]
+description = "DeepVariant germline variant calling (nf-core RUNDEEPVARIANT, --model_type WGS, ext.prefix '{meta.id}.deepvariant')"
+when = "config.call_deepvariant"
+log = "logs/deepvariant.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/deepvariant/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+export MPLCONFIGDIR=$PWD/.matplotlib
+mkdir -p $MPLCONFIGDIR
+/opt/deepvariant/bin/run_deepvariant --ref=reference.fasta --reads={input[0]} --output_vcf={sample}.deepvariant.vcf.gz --output_gvcf={sample}.deepvariant.g.vcf.gz --model_type=WGS --sample_name {sample} --intermediate_results_dir=tmp --num_shards={effective_threads}
+mv {sample}.deepvariant.vcf.gz {sample}.deepvariant.vcf.gz.tbi {sample}.deepvariant.g.vcf.gz {sample}.deepvariant.g.vcf.gz.tbi {config.out_dir}/variant_calling/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 16
+memory = "32G"
+
+[rules.environment]
+singularity = "docker://docker.io/google/deepvariant:1.10.0"
+
+# ---------------------------------------------------------------------------
+# NGSCheckMate (upstream subworkflows/nf-core/bam_ngscheckmate: per-sample
+# BCFTOOLS_MPILEUP -> cohort NGSCHECKMATE_NCM)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bcftools_mpileup_ngscheckmate"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.ngscheckmate_bed}",
+]
+output = [
+  "{config.out_dir}/reports/ngscheckmate/vcfs/{sample}-{config.lane}.ngscheckmate.vcf.gz",
+  "{config.out_dir}/reports/ngscheckmate/vcfs/{sample}-{config.lane}.ngscheckmate.vcf.gz.tbi",
+  "{config.out_dir}/reports/ngscheckmate/vcfs/{sample}-{config.lane}.ngscheckmate.bcftools_stats.txt",
+]
+description = "Per-sample VCFs for NGSCheckMate (nf-core BCFTOOLS_MPILEUP with args2 '--no-version --ploidy 1 -c', args3 '--no-version'; targets = ngscheckmate SNP bed; ext.prefix '{meta.id}.ngscheckmate')"
+when = "config.tools_ngscheckmate"
+log = "logs/bcftools_mpileup_ngscheckmate.log"
+shell = """
+mkdir -p {config.out_dir}/reports/ngscheckmate/vcfs
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.ngscheckmate_bed} ./snp.bed
+echo "{sample}-{config.lane}" > sample_name.list
+bcftools mpileup --fasta-ref reference.fasta -T snp.bed {input[0]} | bcftools call --output-type v --no-version --ploidy 1 -c | bcftools reheader --samples sample_name.list | bcftools view --output-file {sample}-{config.lane}.ngscheckmate.vcf.gz --output-type z --no-version
+tabix -p vcf -f {sample}-{config.lane}.ngscheckmate.vcf.gz
+bcftools stats {sample}-{config.lane}.ngscheckmate.vcf.gz > {sample}-{config.lane}.ngscheckmate.bcftools_stats.txt
+mv {sample}-{config.lane}.ngscheckmate.vcf.gz {sample}-{config.lane}.ngscheckmate.vcf.gz.tbi {sample}-{config.lane}.ngscheckmate.bcftools_stats.txt {config.out_dir}/reports/ngscheckmate/vcfs/
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "ngscheckmate_ncm"
+input = []
+depends_on = ["bcftools_mpileup_ngscheckmate"]
+output = [
+  "{config.out_dir}/reports/ngscheckmate/ngscheckmate_corr_matrix.txt",
+  "{config.out_dir}/reports/ngscheckmate/ngscheckmate_matched.txt",
+  "{config.out_dir}/reports/ngscheckmate/ngscheckmate_all.txt",
+]
+description = "Cohort NGSCheckMate cross-sample concordance (nf-core NGSCHECKMATE_NCM; ncm.py with NCM_REF, -bed SNP bed, -N ngscheckmate -V)"
+when = "config.tools_ngscheckmate"
+log = "logs/ngscheckmate_ncm.log"
+shell = """
+mkdir -p {config.out_dir}/reports/ngscheckmate
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.ngscheckmate_bed} ./snp.bed
+for v in {config.out_dir}/reports/ngscheckmate/vcfs/*.ngscheckmate.vcf.gz; do gunzip -k "$v"; done
+export NCM_REF=./reference.fasta
+ncm.py -d . -bed snp.bed -O . -N ngscheckmate -V
+mv ngscheckmate_corr_matrix.txt ngscheckmate_matched.txt ngscheckmate_all.txt {config.out_dir}/reports/ngscheckmate/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/ngscheckmate:1.0.1--py312pl5321h577a1d6_4"
+
+# ---------------------------------------------------------------------------
 # VCF_QC_BCFTOOLS_VCFTOOLS — nf-core bcftools/stats + vcftools (x3)
 # (ext.prefix = vcf basename minus '.vcf' = '{meta.id}.haplotypecaller.filtered')
 # ---------------------------------------------------------------------------
@@ -509,7 +1333,7 @@ name = "bcftools_stats"
 input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
 output = ["{config.out_dir}/reports/bcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.bcftools_stats.txt"]
 description = "VCF QC stats with bcftools on the filtered VCF (nf-core BCFTOOLS_STATS)"
-when = "config.call_haplotypecaller && !config.skip_bcftools"
+when = "config.call_haplotypecaller && !config.joint_germline && !config.skip_bcftools"
 shell = """
 mkdir -p {config.out_dir}/reports/bcftools/haplotypecaller/{sample}
 bcftools stats {input[0]} > {sample}.haplotypecaller.filtered.bcftools_stats.txt
@@ -528,7 +1352,7 @@ name = "vcftools_tstv_count"
 input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
 output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.TsTv.count"]
 description = "VCF QC: transition/transversion by count on the filtered VCF (nf-core VCFTOOLS_TSTV_COUNT)"
-when = "config.call_haplotypecaller && !config.skip_vcftools"
+when = "config.call_haplotypecaller && !config.joint_germline && !config.skip_vcftools"
 shell = """
 mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
 vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.haplotypecaller.filtered
@@ -547,7 +1371,7 @@ name = "vcftools_tstv_qual"
 input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
 output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.TsTv.qual"]
 description = "VCF QC: transition/transversion by quality on the filtered VCF (nf-core VCFTOOLS_TSTV_QUAL)"
-when = "config.call_haplotypecaller && !config.skip_vcftools"
+when = "config.call_haplotypecaller && !config.joint_germline && !config.skip_vcftools"
 shell = """
 mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
 vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.haplotypecaller.filtered
@@ -566,7 +1390,7 @@ name = "vcftools_filter_summary"
 input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
 output = ["{config.out_dir}/reports/vcftools/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.FILTER.summary"]
 description = "VCF QC: FILTER summary on the filtered VCF (nf-core VCFTOOLS_SUMMARY)"
-when = "config.call_haplotypecaller && !config.skip_vcftools"
+when = "config.call_haplotypecaller && !config.joint_germline && !config.skip_vcftools"
 shell = """
 mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/{sample}
 vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.haplotypecaller.filtered
@@ -595,13 +1419,387 @@ output = [
   "{config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_VEP.ann.summary.html",
 ]
 description = "VEP annotation of filtered germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
-when = "config.call_haplotypecaller && config.annotate_vep && config.vep_cache_ready"
+when = "config.call_haplotypecaller && !config.joint_germline && config.annotate_vep && config.vep_cache_ready"
 shell = """
 mkdir -p {config.out_dir}/annotation/haplotypecaller/{sample} {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}
 vep -i {input[0]} -o {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz --stats_file {sample}.haplotypecaller.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
 tabix {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz
 mv {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz {sample}.haplotypecaller.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/{sample}/
 mv {sample}.haplotypecaller.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+# ---------------------------------------------------------------------------
+# Joint germline genotyping — upstream subworkflows/local/
+# bam_joint_calling_germline_gatk (params.joint_germline=true):
+#   GATK4_HAPLOTYPECALLER (-ERC GVCF) -> GATK4_GENOMICSDBIMPORT
+#   -> GATK4_GENOTYPEGVCFS -> BCFTOOLS_SORT -> GATK4_MERGEVCFS (joint_germline.vcf.gz)
+#   -> GATK4_VARIANTRECALIBRATOR SNP + INDEL -> GATK4_APPLYVQSR SNP + INDEL
+#   -> joint VCF_QC (bcftools + vcftools) + ENSEMBLVEP_VEP -> MULTIQC.
+# The port runs without interval scatter: one whole-genome interval is built
+# from the fasta .fai (upstream: per-contig intervals from BED_PREPARE_INTERVALS)
+# and the sort/merge steps are single-file pass-throughs.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "gatk_haplotypecaller_gvcf"
+input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.g.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.g.vcf.gz.tbi",
+]
+description = "HaplotypeCaller in GVCF mode (nf-core GATK4_HAPLOTYPECALLER -ERC GVCF; joint_germline=true branch)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_haplotypecaller_gvcf.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {sample}.haplotypecaller.g.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model} -ERC GVCF
+mv {sample}.haplotypecaller.g.vcf.gz {sample}.haplotypecaller.g.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_genomicsdbimport"
+input = ["{config.fasta_fai}"]
+output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.joint/callset.json"]
+description = "Import per-sample GVCFs into a GenomicsDB workspace (nf-core GATK4_GENOMICSDBIMPORT; single whole-genome interval from the .fai — see section note)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_genomicsdbimport.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta_fai} ./reference.fasta.fai
+awk '{{print $1"\\t0\\t"$2}}' reference.fasta.fai > {config.joint_interval_name}.bed
+GVCFS=""
+for v in {config.out_dir}/variant_calling/haplotypecaller/*/*.haplotypecaller.g.vcf.gz; do GVCFS="$GVCFS --variant $v"; done
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GenomicsDBImport $GVCFS --genomicsdb-workspace-path {config.joint_interval_name}.joint --intervals {config.joint_interval_name}.bed --genomicsdb-shared-posixfs-optimizations true --tmp-dir .
+mv {config.joint_interval_name}.joint {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_genotypegvcfs"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.joint/callset.json"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.vcf.gz.tbi",
+]
+description = "Joint genotyping of the GenomicsDB workspace (nf-core GATK4_GENOTYPEGVCFS; output = '{intervals_name}.vcf.gz' upstream)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_genotypegvcfs.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GenotypeGVCFs --variant gendb://{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.joint --output {config.joint_interval_name}.vcf.gz --reference reference.fasta --dbsnp $(basename {config.dbsnp}) --genomicsdb-shared-posixfs-optimizations true --tmp-dir .
+mv {config.joint_interval_name}.vcf.gz {config.joint_interval_name}.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "bcftools_sort_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.sort.vcf.gz"]
+description = "Sort the joint-genotyped VCF (nf-core BCFTOOLS_SORT, ext.prefix = vcf.baseName - '.vcf' + '.sort'; single-file pass-through without interval scatter)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/bcftools_sort_joint.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+bcftools sort --output {config.joint_interval_name}.sort.vcf.gz --temp-dir . --output-type z {input[0]}
+mv {config.joint_interval_name}.sort.vcf.gz {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "gatk_mergevcfs_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.sort.vcf.gz"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz.tbi",
+]
+description = "Merge the per-interval joint VCFs (nf-core GATK4_MERGEVCFS, ext.prefix 'joint_germline')"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_mergevcfs_joint.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MergeVcfs $(for v in {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/*.sort.vcf.gz; do echo -n "--INPUT $v "; done) --OUTPUT joint_germline.vcf.gz --TMP_DIR .
+mv joint_germline.vcf.gz joint_germline.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_variantrecalibrator_snp"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.recal",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.recal.idx",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.tranches",
+]
+description = "VQSR SNP recalibration of the joint VCF (nf-core GATK4_VARIANTRECALIBRATOR SNP; dbsnp + 1000G omni2.5 resources from conf/igenomes.config; not published upstream — kept for DAG handoff)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_variantrecalibrator_snp.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+cp -L {config.known_snps} {config.known_snps_tbi} .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" VariantRecalibrator --variant {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz --output joint_variant_calling_SNP.recal --tranches-file joint_variant_calling_SNP.tranches --reference reference.fasta --tmp-dir . --resource:1000G,known=false,training=true,truth=true,prior=10.0 $(basename {config.known_snps}) --resource:dbsnp,known=false,training=true,truth=false,prior=2.0 $(basename {config.dbsnp}) -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR -mode SNP
+mv joint_variant_calling_SNP.recal joint_variant_calling_SNP.recal.idx joint_variant_calling_SNP.tranches {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_variantrecalibrator_indel"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz"]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.recal",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.recal.idx",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.tranches",
+]
+description = "VQSR INDEL recalibration of the joint VCF (nf-core GATK4_VARIANTRECALIBRATOR INDEL; gatk + mills known-indels resources; not published upstream — kept for DAG handoff)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_variantrecalibrator_indel.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+SITES=""
+for v in $(echo {config.known_indels} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+    case "$(basename "$v")" in
+        Mills*) SITES="$SITES --resource:mills,known=false,training=true,truth=true,prior=10.0 $(basename "$v")" ;;
+        *)      SITES="$SITES --resource:gatk,known=false,training=true,truth=true,prior=10.0 $(basename "$v")" ;;
+    esac
+done
+for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+done
+SITES="$SITES --resource:dbsnp,known=false,training=true,truth=false,prior=2.0 $(basename {config.dbsnp})"
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" VariantRecalibrator --variant {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz --output joint_variant_calling_INDEL.recal --tranches-file joint_variant_calling_INDEL.tranches --reference reference.fasta --tmp-dir . $SITES -an QD -an MQRankSum -an ReadPosRankSum -an FS -an SOR -an DP -mode INDEL
+mv joint_variant_calling_INDEL.recal joint_variant_calling_INDEL.recal.idx joint_variant_calling_INDEL.tranches {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_applyvqsr_snp"
+input = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.recal",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.recal.idx",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.tranches",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/recalibrated_joint_variant_calling_SNP.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/recalibrated_joint_variant_calling_SNP.vcf.gz.tbi",
+]
+description = "Apply VQSR SNP recalibration (nf-core GATK4_APPLYVQSR SNP, --truth-sensitivity-filter-level 99.9; ext.prefix 'recalibrated_joint_variant_calling_SNP'; not published upstream — kept for DAG handoff)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_applyvqsr_snp.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz* .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyVQSR --variant joint_germline.vcf.gz --output recalibrated_joint_variant_calling_SNP.vcf.gz --reference reference.fasta --tranches-file {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.tranches --recal-file {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_SNP.recal --tmp-dir . --truth-sensitivity-filter-level 99.9 -mode SNP
+mv recalibrated_joint_variant_calling_SNP.vcf.gz recalibrated_joint_variant_calling_SNP.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_applyvqsr_indel"
+input = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/recalibrated_joint_variant_calling_SNP.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.recal",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.recal.idx",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.tranches",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz.tbi",
+]
+description = "Apply VQSR INDEL recalibration to the SNP-recalibrated joint VCF (nf-core GATK4_APPLYVQSR INDEL; ext.prefix 'joint_germline_recalibrated' — the final published joint VCF)"
+when = "config.call_haplotypecaller && config.joint_germline"
+log = "logs/gatk_applyvqsr_indel.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/recalibrated_joint_variant_calling_SNP.vcf.gz* .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyVQSR --variant recalibrated_joint_variant_calling_SNP.vcf.gz --output joint_germline_recalibrated.vcf.gz --reference reference.fasta --tranches-file {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.tranches --recal-file {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_variant_calling_INDEL.recal --tmp-dir . --truth-sensitivity-filter-level 99.9 -mode INDEL
+mv joint_germline_recalibrated.vcf.gz joint_germline_recalibrated.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# Joint VCF QC + VEP — VCF_QC_BCFTOOLS_VCFTOOLS and ENSEMBLVEP_VEP on the
+# final VQSR'd joint VCF (upstream: the joint VCF replaces the per-sample
+# filtered VCF in vcf_all, so the per-sample QC/VEP rules above are gated
+# off in joint mode and these cohort rules take over).
+[[rules]]
+name = "bcftools_stats_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.bcftools_stats.txt"]
+description = "VCF QC stats on the recalibrated joint VCF (nf-core BCFTOOLS_STATS on vcf_all)"
+when = "config.call_haplotypecaller && config.joint_germline && !config.skip_bcftools"
+log = "logs/bcftools_stats_joint.log"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/haplotypecaller/joint_variant_calling
+bcftools stats {input[0]} > joint_germline_recalibrated.bcftools_stats.txt
+mv joint_germline_recalibrated.bcftools_stats.txt {config.out_dir}/reports/bcftools/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the recalibrated joint VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_haplotypecaller && config.joint_germline && !config.skip_vcftools"
+log = "logs/vcftools_tstv_count_joint.log"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling
+vcftools --gzvcf {input[0]} --TsTv-by-count --out joint_germline_recalibrated
+mv joint_germline_recalibrated.TsTv.count {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the recalibrated joint VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_haplotypecaller && config.joint_germline && !config.skip_vcftools"
+log = "logs/vcftools_tstv_qual_joint.log"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out joint_germline_recalibrated
+mv joint_germline_recalibrated.TsTv.qual {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.FILTER.summary"]
+description = "VCF QC: FILTER summary on the recalibrated joint VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_haplotypecaller && config.joint_germline && !config.skip_vcftools"
+log = "logs/vcftools_filter_summary_joint.log"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling
+vcftools --gzvcf {input[0]} --FILTER-summary --out joint_germline_recalibrated
+mv joint_germline_recalibrated.FILTER.summary {config.out_dir}/reports/vcftools/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_VEP.ann.summary.html",
+]
+description = "VEP annotation of the recalibrated joint VCF (nf-core ENSEMBLVEP_VEP on vcf_all; requires VEP cache — gated on vep_cache_ready)"
+when = "config.call_haplotypecaller && config.joint_germline && config.annotate_vep && config.vep_cache_ready"
+log = "logs/ensemblvep_vep_joint.log"
+shell = """
+mkdir -p {config.out_dir}/annotation/haplotypecaller/joint_variant_calling {config.out_dir}/reports/EnsemblVEP/haplotypecaller/joint_variant_calling
+vep -i {input[0]} -o joint_germline_recalibrated_VEP.ann.vcf.gz --stats_file joint_germline_recalibrated_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix joint_germline_recalibrated_VEP.ann.vcf.gz
+mv joint_germline_recalibrated_VEP.ann.vcf.gz joint_germline_recalibrated_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/joint_variant_calling/
+mv joint_germline_recalibrated_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/haplotypecaller/joint_variant_calling/
 """
 
 [rules.resources]
@@ -621,7 +1819,9 @@ input = []
 depends_on = [
   "fastqc",
   "fastp",
+  "fastp_umi",
   "gatk_markduplicates",
+  "gatk_markduplicates_bam",
   "mosdepth_md",
   "samtools_stats_md",
   "mosdepth_recal",
@@ -633,6 +1833,15 @@ depends_on = [
   "vcftools_tstv_qual",
   "vcftools_filter_summary",
   "ensemblvep_vep",
+  "bcftools_stats_joint",
+  "vcftools_tstv_count_joint",
+  "vcftools_tstv_qual_joint",
+  "vcftools_filter_summary_joint",
+  "ensemblvep_vep_joint",
+  "fgbio_groupreadsbyumi",
+  "bcftools_mpileup_ngscheckmate",
+  "ngscheckmate_ncm",
+  "goleft_indexcov",
 ]
 output = ["{config.out_dir}/multiqc_report.html"]
 description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"
