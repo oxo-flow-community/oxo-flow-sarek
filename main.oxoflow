@@ -129,6 +129,22 @@ group_by_umi_strategy = "Adjacency"   # upstream params.group_by_umi_strategy
 # interval is built from the fasta .fai (upstream: per-contig BED_PREPARE_INTERVALS)
 joint_interval_name = "whole_genome"
 
+# Optional per-chromosome scatter/gather branch (default off). When
+# scatter_gatk = true, BQSR / ApplyBQSR / HaplotypeCaller (and the joint
+# GenotypeGVCFs) run one job per chromosome and the per-chromosome outputs
+# are gathered (GatherBQSRReports / samtools merge+index / MergeVcfs) —
+# results identical to the single whole-genome job (gathers are exact), with
+# per-chromosome parallelism. Upstream scatters over dynamic duration-binned
+# interval files; the engine's scatter takes a static value list, so the port
+# uses one interval per chromosome. Keep `chromosomes` in sync with the
+# contigs of your fasta .fai (each entry must exist in the .fai).
+scatter_gatk = false
+chromosomes = [
+  "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
+  "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17",
+  "chr18", "chr19", "chr20", "chr21", "chr22", "chrX", "chrY", "chrM",
+]
+
 [[sample_groups]]
 name = "cohort"
 samples = ["test", "test2"]
@@ -680,6 +696,7 @@ name = "gatk_baserecalibrator"
 input = ["{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}"]
 output = ["{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table"]
 description = "Base quality score recalibration table (nf-core GATK4_BASERECALIBRATOR)"
+when = "!config.scatter_gatk"
 shell = """
 mkdir -p {config.out_dir}/preprocessing/recal_table/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -717,6 +734,7 @@ input = [
 ]
 output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
 description = "Apply base quality score recalibration to the alignment file (nf-core GATK4_APPLYBQSR)"
+when = "!config.scatter_gatk"
 shell = """
 mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -742,6 +760,7 @@ name = "samtools_index_recal"
 input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
 output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}"]
 description = "Index recalibrated alignment file (nf-core SAMTOOLS_INDEX)"
+when = "!config.scatter_gatk"
 shell = "samtools index -@ 1 {input[0]}"
 
 [rules.resources]
@@ -815,7 +834,7 @@ output = [
   "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz.tbi",
 ]
 description = "Germline variant calling with GATK4 HaplotypeCaller (nf-core GATK4_HAPLOTYPECALLER; joint_germline=false branch — GVCF mode is gatk_haplotypecaller_gvcf)"
-when = "config.call_haplotypecaller && !config.joint_germline"
+when = "config.call_haplotypecaller && !config.joint_germline && !config.scatter_gatk"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
 cp -L {config.fasta} ./reference.fasta
@@ -1436,6 +1455,621 @@ memory = "36G"
 conda = "envs/vep.yaml"
 
 # ---------------------------------------------------------------------------
+# Per-caller VCF_QC_BCFTOOLS_VCFTOOLS + ENSEMBLVEP_VEP — upstream runs the
+# VCF_QC and VEP processes on every caller's published VCF (sarek.nf
+# vcf_all channel: freebayes/strelka/mpileup/deepvariant/manta/tiddit +
+# haplotypecaller + joint), so the QC/annotation fan-out is ported here one
+# rule per caller. When-gated on the same call_* toggles as the callers
+# themselves, so only VCFs that exist are consumed. Tiddit publishes an
+# uncompressed .vcf — vcftools uses --vcf for it, --gzvcf for the others.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bcftools_stats_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/freebayes/{sample}/{sample}.freebayes.filtered.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the freebayes VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_freebayes && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/freebayes/{sample}
+bcftools stats {input[0]} > {sample}.freebayes.filtered.bcftools_stats.txt
+mv {sample}.freebayes.filtered.bcftools_stats.txt {config.out_dir}/reports/bcftools/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayes/{sample}/{sample}.freebayes.filtered.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the freebayes VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_freebayes && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayes/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.freebayes.filtered
+mv {sample}.freebayes.filtered.TsTv.count {config.out_dir}/reports/vcftools/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayes/{sample}/{sample}.freebayes.filtered.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the freebayes VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_freebayes && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayes/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.freebayes.filtered
+mv {sample}.freebayes.filtered.TsTv.qual {config.out_dir}/reports/vcftools/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayes/{sample}/{sample}.freebayes.filtered.FILTER.summary"]
+description = "VCF QC: FILTER summary on the freebayes VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_freebayes && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayes/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.freebayes.filtered
+mv {sample}.freebayes.filtered.FILTER.summary {config.out_dir}/reports/vcftools/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/freebayes/{sample}/{sample}.freebayes.filtered_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/freebayes/{sample}/{sample}.freebayes.filtered_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/freebayes/{sample}/{sample}.freebayes.filtered_VEP.ann.summary.html",
+]
+description = "VEP annotation of freebayes germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_freebayes && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/freebayes/{sample} {config.out_dir}/reports/EnsemblVEP/freebayes/{sample}
+vep -i {input[0]} -o {sample}.freebayes.filtered_VEP.ann.vcf.gz --stats_file {sample}.freebayes.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.freebayes.filtered_VEP.ann.vcf.gz
+mv {sample}.freebayes.filtered_VEP.ann.vcf.gz {sample}.freebayes.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/freebayes/{sample}/
+mv {sample}.freebayes.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+[[rules]]
+name = "bcftools_stats_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/strelka/{sample}/{sample}.strelka.variants.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the strelka VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_strelka && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/strelka/{sample}
+bcftools stats {input[0]} > {sample}.strelka.variants.bcftools_stats.txt
+mv {sample}.strelka.variants.bcftools_stats.txt {config.out_dir}/reports/bcftools/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/strelka/{sample}/{sample}.strelka.variants.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the strelka VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_strelka && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/strelka/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.strelka.variants
+mv {sample}.strelka.variants.TsTv.count {config.out_dir}/reports/vcftools/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/strelka/{sample}/{sample}.strelka.variants.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the strelka VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_strelka && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/strelka/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.strelka.variants
+mv {sample}.strelka.variants.TsTv.qual {config.out_dir}/reports/vcftools/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/strelka/{sample}/{sample}.strelka.variants.FILTER.summary"]
+description = "VCF QC: FILTER summary on the strelka VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_strelka && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/strelka/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.strelka.variants
+mv {sample}.strelka.variants.FILTER.summary {config.out_dir}/reports/vcftools/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/strelka/{sample}/{sample}.strelka.variants_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/strelka/{sample}/{sample}.strelka.variants_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/strelka/{sample}/{sample}.strelka.variants_VEP.ann.summary.html",
+]
+description = "VEP annotation of strelka germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_strelka && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/strelka/{sample} {config.out_dir}/reports/EnsemblVEP/strelka/{sample}
+vep -i {input[0]} -o {sample}.strelka.variants_VEP.ann.vcf.gz --stats_file {sample}.strelka.variants_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.strelka.variants_VEP.ann.vcf.gz
+mv {sample}.strelka.variants_VEP.ann.vcf.gz {sample}.strelka.variants_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/strelka/{sample}/
+mv {sample}.strelka.variants_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+[[rules]]
+name = "bcftools_stats_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/bcftools/{sample}/{sample}.bcftools.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the mpileup VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_mpileup && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/bcftools/{sample}
+bcftools stats {input[0]} > {sample}.bcftools.bcftools_stats.txt
+mv {sample}.bcftools.bcftools_stats.txt {config.out_dir}/reports/bcftools/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/bcftools/{sample}/{sample}.bcftools.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the mpileup VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_mpileup && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/bcftools/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.bcftools
+mv {sample}.bcftools.TsTv.count {config.out_dir}/reports/vcftools/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/bcftools/{sample}/{sample}.bcftools.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the mpileup VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_mpileup && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/bcftools/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.bcftools
+mv {sample}.bcftools.TsTv.qual {config.out_dir}/reports/vcftools/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/bcftools/{sample}/{sample}.bcftools.FILTER.summary"]
+description = "VCF QC: FILTER summary on the mpileup VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_mpileup && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/bcftools/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.bcftools
+mv {sample}.bcftools.FILTER.summary {config.out_dir}/reports/vcftools/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/bcftools/{sample}/{sample}.bcftools_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/bcftools/{sample}/{sample}.bcftools_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/bcftools/{sample}/{sample}.bcftools_VEP.ann.summary.html",
+]
+description = "VEP annotation of mpileup germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_mpileup && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/bcftools/{sample} {config.out_dir}/reports/EnsemblVEP/bcftools/{sample}
+vep -i {input[0]} -o {sample}.bcftools_VEP.ann.vcf.gz --stats_file {sample}.bcftools_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.bcftools_VEP.ann.vcf.gz
+mv {sample}.bcftools_VEP.ann.vcf.gz {sample}.bcftools_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/bcftools/{sample}/
+mv {sample}.bcftools_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+[[rules]]
+name = "bcftools_stats_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/deepvariant/{sample}/{sample}.deepvariant.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the deepvariant VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_deepvariant && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/deepvariant/{sample}
+bcftools stats {input[0]} > {sample}.deepvariant.bcftools_stats.txt
+mv {sample}.deepvariant.bcftools_stats.txt {config.out_dir}/reports/bcftools/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/deepvariant/{sample}/{sample}.deepvariant.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the deepvariant VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_deepvariant && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/deepvariant/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.deepvariant
+mv {sample}.deepvariant.TsTv.count {config.out_dir}/reports/vcftools/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/deepvariant/{sample}/{sample}.deepvariant.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the deepvariant VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_deepvariant && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/deepvariant/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.deepvariant
+mv {sample}.deepvariant.TsTv.qual {config.out_dir}/reports/vcftools/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/deepvariant/{sample}/{sample}.deepvariant.FILTER.summary"]
+description = "VCF QC: FILTER summary on the deepvariant VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_deepvariant && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/deepvariant/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.deepvariant
+mv {sample}.deepvariant.FILTER.summary {config.out_dir}/reports/vcftools/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/deepvariant/{sample}/{sample}.deepvariant_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/deepvariant/{sample}/{sample}.deepvariant_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/deepvariant/{sample}/{sample}.deepvariant_VEP.ann.summary.html",
+]
+description = "VEP annotation of deepvariant germline variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_deepvariant && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/deepvariant/{sample} {config.out_dir}/reports/EnsemblVEP/deepvariant/{sample}
+vep -i {input[0]} -o {sample}.deepvariant_VEP.ann.vcf.gz --stats_file {sample}.deepvariant_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.deepvariant_VEP.ann.vcf.gz
+mv {sample}.deepvariant_VEP.ann.vcf.gz {sample}.deepvariant_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/deepvariant/{sample}/
+mv {sample}.deepvariant_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+[[rules]]
+name = "bcftools_stats_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/manta/{sample}/{sample}.manta.diploid_sv.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the manta SV VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_manta && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/manta/{sample}
+bcftools stats {input[0]} > {sample}.manta.diploid_sv.bcftools_stats.txt
+mv {sample}.manta.diploid_sv.bcftools_stats.txt {config.out_dir}/reports/bcftools/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/manta/{sample}/{sample}.manta.diploid_sv.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the manta SV VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_manta && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/manta/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.manta.diploid_sv
+mv {sample}.manta.diploid_sv.TsTv.count {config.out_dir}/reports/vcftools/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/manta/{sample}/{sample}.manta.diploid_sv.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the manta SV VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_manta && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/manta/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.manta.diploid_sv
+mv {sample}.manta.diploid_sv.TsTv.qual {config.out_dir}/reports/vcftools/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/manta/{sample}/{sample}.manta.diploid_sv.FILTER.summary"]
+description = "VCF QC: FILTER summary on the manta SV VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_manta && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/manta/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.manta.diploid_sv
+mv {sample}.manta.diploid_sv.FILTER.summary {config.out_dir}/reports/vcftools/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/manta/{sample}/{sample}.manta.diploid_sv_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/manta/{sample}/{sample}.manta.diploid_sv_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/manta/{sample}/{sample}.manta.diploid_sv_VEP.ann.summary.html",
+]
+description = "VEP annotation of manta SV variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_manta && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/manta/{sample} {config.out_dir}/reports/EnsemblVEP/manta/{sample}
+vep -i {input[0]} -o {sample}.manta.diploid_sv_VEP.ann.vcf.gz --stats_file {sample}.manta.diploid_sv_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.manta.diploid_sv_VEP.ann.vcf.gz
+mv {sample}.manta.diploid_sv_VEP.ann.vcf.gz {sample}.manta.diploid_sv_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/manta/{sample}/
+mv {sample}.manta.diploid_sv_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+[[rules]]
+name = "bcftools_stats_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = ["{config.out_dir}/reports/bcftools/tiddit/{sample}/{sample}.tiddit.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the tiddit SV VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_tiddit && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/tiddit/{sample}
+bcftools stats {input[0]} > {sample}.tiddit.bcftools_stats.txt
+mv {sample}.tiddit.bcftools_stats.txt {config.out_dir}/reports/bcftools/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = ["{config.out_dir}/reports/vcftools/tiddit/{sample}/{sample}.tiddit.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the tiddit SV VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_tiddit && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/tiddit/{sample}
+vcftools --vcf {input[0]} --TsTv-by-count --out {sample}.tiddit
+mv {sample}.tiddit.TsTv.count {config.out_dir}/reports/vcftools/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = ["{config.out_dir}/reports/vcftools/tiddit/{sample}/{sample}.tiddit.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the tiddit SV VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_tiddit && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/tiddit/{sample}
+vcftools --vcf {input[0]} --TsTv-by-qual --out {sample}.tiddit
+mv {sample}.tiddit.TsTv.qual {config.out_dir}/reports/vcftools/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = ["{config.out_dir}/reports/vcftools/tiddit/{sample}/{sample}.tiddit.FILTER.summary"]
+description = "VCF QC: FILTER summary on the tiddit SV VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_tiddit && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/tiddit/{sample}
+vcftools --vcf {input[0]} --FILTER-summary --out {sample}.tiddit
+mv {sample}.tiddit.FILTER.summary {config.out_dir}/reports/vcftools/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = [
+  "{config.out_dir}/annotation/tiddit/{sample}/{sample}.tiddit_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/tiddit/{sample}/{sample}.tiddit_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/tiddit/{sample}/{sample}.tiddit_VEP.ann.summary.html",
+]
+description = "VEP annotation of tiddit SV variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_tiddit && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/tiddit/{sample} {config.out_dir}/reports/EnsemblVEP/tiddit/{sample}
+vep -i {input[0]} -o {sample}.tiddit_VEP.ann.vcf.gz --stats_file {sample}.tiddit_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.tiddit_VEP.ann.vcf.gz
+mv {sample}.tiddit_VEP.ann.vcf.gz {sample}.tiddit_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/tiddit/{sample}/
+mv {sample}.tiddit_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+# ---------------------------------------------------------------------------
 # Joint germline genotyping — upstream subworkflows/local/
 # bam_joint_calling_germline_gatk (params.joint_germline=true):
 #   GATK4_HAPLOTYPECALLER (-ERC GVCF) -> GATK4_GENOMICSDBIMPORT
@@ -1454,7 +2088,7 @@ output = [
   "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.g.vcf.gz.tbi",
 ]
 description = "HaplotypeCaller in GVCF mode (nf-core GATK4_HAPLOTYPECALLER -ERC GVCF; joint_germline=true branch)"
-when = "config.call_haplotypecaller && config.joint_germline"
+when = "config.call_haplotypecaller && config.joint_germline && !config.scatter_gatk"
 log = "logs/gatk_haplotypecaller_gvcf.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
@@ -1478,7 +2112,7 @@ name = "gatk_genomicsdbimport"
 input = ["{config.fasta_fai}"]
 output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.joint/callset.json"]
 description = "Import per-sample GVCFs into a GenomicsDB workspace (nf-core GATK4_GENOMICSDBIMPORT; single whole-genome interval from the .fai — see section note)"
-when = "config.call_haplotypecaller && config.joint_germline"
+when = "config.call_haplotypecaller && config.joint_germline && !config.scatter_gatk"
 log = "logs/gatk_genomicsdbimport.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
@@ -1505,7 +2139,7 @@ output = [
   "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.vcf.gz.tbi",
 ]
 description = "Joint genotyping of the GenomicsDB workspace (nf-core GATK4_GENOTYPEGVCFS; output = '{intervals_name}.vcf.gz' upstream)"
-when = "config.call_haplotypecaller && config.joint_germline"
+when = "config.call_haplotypecaller && config.joint_germline && !config.scatter_gatk"
 log = "logs/gatk_genotypegvcfs.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
@@ -1529,7 +2163,7 @@ name = "bcftools_sort_joint"
 input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.vcf.gz"]
 output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/{config.joint_interval_name}.sort.vcf.gz"]
 description = "Sort the joint-genotyped VCF (nf-core BCFTOOLS_SORT, ext.prefix = vcf.baseName - '.vcf' + '.sort'; single-file pass-through without interval scatter)"
-when = "config.call_haplotypecaller && config.joint_germline"
+when = "config.call_haplotypecaller && config.joint_germline && !config.scatter_gatk"
 log = "logs/bcftools_sort_joint.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
@@ -1552,7 +2186,7 @@ output = [
   "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz.tbi",
 ]
 description = "Merge the per-interval joint VCFs (nf-core GATK4_MERGEVCFS, ext.prefix 'joint_germline')"
-when = "config.call_haplotypecaller && config.joint_germline"
+when = "config.call_haplotypecaller && config.joint_germline && !config.scatter_gatk"
 log = "logs/gatk_mergevcfs_joint.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
@@ -1810,6 +2444,385 @@ memory = "36G"
 conda = "envs/vep.yaml"
 
 # ---------------------------------------------------------------------------
+# Per-chromosome scatter/gather branch (optional, gated by scatter_gatk).
+# Upstream PREPARE_INTERVALS (BUILD_INTERVALS gawk over the .fai ->
+# CREATE_INTERVALS_BED duration-binned split -> TABIX_BGZIPTABIX) then
+# scatters BQSR / ApplyBQSR / HaplotypeCaller / joint GenotypeGVCFs over the
+# interval files and gathers (GATK4_GATHERBQSRREPORTS,
+# CRAM/BAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS). The engine's scatter fan-out
+# takes a static value list, so the port uses one interval per chromosome
+# (config.chromosomes — keep it in sync with the fasta .fai) instead of the
+# upstream duration-binned files; the gathers are exact, so results are
+# identical to both the upstream scatter path and the port's single
+# whole-genome jobs. Gather outputs reuse the non-scatter rules' paths —
+# the two branches are mutually exclusive via when, all downstream rules
+# are unchanged.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "create_intervals_bed"
+input = ["{config.fasta_fai}"]
+output = ["{config.out_dir}/intervals/{chr}.bed"]
+description = "One 0-based BED interval per chromosome from the fasta .fai (upstream BUILD_INTERVALS + CREATE_INTERVALS_BED; per-chromosome instead of duration-binned windows)"
+when = "config.scatter_gatk"
+log = "logs/create_intervals_bed.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/intervals
+cp -L {config.fasta_fai} ./reference.fasta.fai
+awk -v c="{chr}" -v FS="\\t" -v OFS="\\t" '$1==c {print $1, "0", $2}' reference.fasta.fai > {chr}.bed
+mv {chr}.bed {config.out_dir}/intervals/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/gawk:5.3.0"
+
+[[rules]]
+name = "tabix_interval"
+input = ["{config.out_dir}/intervals/{chr}.bed"]
+output = [
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+  "{config.out_dir}/intervals/{chr}.bed.gz.tbi",
+]
+description = "bgzip + tabix the per-chromosome interval BED (upstream TABIX_BGZIPTABIX_INTERVAL_SPLIT)"
+when = "config.scatter_gatk"
+log = "logs/tabix_interval.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/intervals
+cp -L {config.out_dir}/intervals/{chr}.bed .
+bgzip -f {chr}.bed
+tabix -p bed {chr}.bed.gz
+mv {chr}.bed.gz {chr}.bed.gz.tbi {config.out_dir}/intervals/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+[[rules]]
+name = "gatk_baserecalibrator_scatter"
+input = [
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}",
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+  "{config.out_dir}/intervals/{chr}.bed.gz.tbi",
+]
+output = ["{config.out_dir}/preprocessing/recal_table/{sample}/scatter/{chr}.table"]
+description = "BaseRecalibrator per chromosome (nf-core GATK4_BASERECALIBRATOR with --intervals; scatter_gatk branch)"
+when = "config.scatter_gatk"
+log = "logs/gatk_baserecalibrator_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/preprocessing/recal_table/{sample}/scatter
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+cp -L {config.out_dir}/intervals/{chr}.bed.gz {config.out_dir}/intervals/{chr}.bed.gz.tbi .
+SITES="--known-sites $(basename {config.dbsnp})"
+for v in $(echo {config.known_indels} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+    SITES="$SITES --known-sites $(basename "$v")"
+done
+for v in $(echo {config.known_indels_tbi} | tr -d '[]"' | tr ',' ' '); do
+    cp -L "$v" .
+done
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" BaseRecalibrator --input {input[0]} --output {chr}.table --reference reference.fasta $SITES --intervals {chr}.bed.gz --tmp-dir .
+mv {chr}.table {config.out_dir}/preprocessing/recal_table/{sample}/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_gatherbqsrreports"
+input = []
+output = ["{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table"]
+description = "Merge the per-chromosome recalibration tables (nf-core GATK4_GATHERBQSRREPORTS; output path = non-scatter branch)"
+when = "config.scatter_gatk"
+log = "logs/gatk_gatherbqsrreports.log"
+expand_inputs = [
+  { pattern = "{config.out_dir}/preprocessing/recal_table/{sample}/scatter/{chr}.table", variables = { chr = "config.chromosomes" } }
+]
+shell = """
+mkdir -p {config.out_dir}/preprocessing/recal_table/{sample}
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GatherBQSRReports $(for t in {input}; do echo -n "--input $t "; done) --output {sample}.recal.table --tmp-dir .
+mv {sample}.recal.table {config.out_dir}/preprocessing/recal_table/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_applybqsr_scatter"
+input = [
+  "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}",
+  "{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table",
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+]
+output = ["{config.out_dir}/recalibrated/{sample}/scatter/{chr}.recal.{config.alignment_ext}"]
+description = "ApplyBQSR per chromosome (nf-core GATK4_APPLYBQSR with --intervals; scatter_gatk branch)"
+when = "config.scatter_gatk"
+log = "logs/gatk_applybqsr_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/recalibrated/{sample}/scatter
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.out_dir}/intervals/{chr}.bed.gz .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {chr}.recal.{config.alignment_ext} --reference reference.fasta --bqsr-recal-file {input[1]} --intervals {chr}.bed.gz --tmp-dir .
+mv {chr}.recal.{config.alignment_ext} {config.out_dir}/recalibrated/{sample}/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "4G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "merge_index_samtools"
+input = []
+output = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
+]
+description = "Merge the per-chromosome recalibrated alignments + index (upstream CRAM/BAM_MERGE_INDEX_SAMTOOLS; output paths = non-scatter branch)"
+when = "config.scatter_gatk"
+log = "logs/merge_index_samtools.log"
+expand_inputs = [
+  { pattern = "{config.out_dir}/recalibrated/{sample}/scatter/{chr}.recal.{config.alignment_ext}", variables = { chr = "config.chromosomes" } }
+]
+shell = """
+mkdir -p {config.out_dir}/recalibrated/{sample}
+cp -L {config.fasta} ./reference.fasta
+samtools merge --threads {effective_threads} --reference reference.fasta {sample}.recal.{config.alignment_ext} {input}
+samtools index {sample}.recal.{config.alignment_ext}
+mv {sample}.recal.{config.alignment_ext} {sample}.recal.{config.recal_index_ext} {config.out_dir}/recalibrated/{sample}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+[[rules]]
+name = "gatk_haplotypecaller_scatter"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/{chr}.haplotypecaller.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/{chr}.haplotypecaller.vcf.gz.tbi",
+]
+description = "HaplotypeCaller per chromosome (nf-core GATK4_HAPLOTYPECALLER with --intervals; scatter_gatk branch)"
+when = "config.scatter_gatk && !config.joint_germline"
+log = "logs/gatk_haplotypecaller_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+cp -L {config.out_dir}/intervals/{chr}.bed.gz .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {chr}.haplotypecaller.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model} --intervals {chr}.bed.gz
+mv {chr}.haplotypecaller.vcf.gz {chr}.haplotypecaller.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_mergevcfs_scatter"
+input = []
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz.tbi",
+]
+description = "Merge the per-chromosome HaplotypeCaller VCFs (nf-core GATK4_MERGEVCFS; output paths = non-scatter branch)"
+when = "config.scatter_gatk && !config.joint_germline"
+log = "logs/gatk_mergevcfs_scatter.log"
+expand_inputs = [
+  { pattern = "{config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/{chr}.haplotypecaller.vcf.gz", variables = { chr = "config.chromosomes" } }
+]
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MergeVcfs $(for v in {input}; do echo -n "--INPUT $v "; done) --OUTPUT {sample}.haplotypecaller.vcf.gz --TMP_DIR .
+tabix -f {sample}.haplotypecaller.vcf.gz
+mv {sample}.haplotypecaller.vcf.gz {sample}.haplotypecaller.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# Joint-mode scatter: HaplotypeCaller -ERC GVCF per chromosome ->
+# GenomicsDBImport per chromosome -> GenotypeGVCFs per chromosome ->
+# bcftools sort per chromosome -> MergeVcfs (same outputs as the
+# non-scatter joint branch, so VQSR and the joint QC/VEP rules are unchanged)
+[[rules]]
+name = "gatk_haplotypecaller_gvcf_scatter"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/{chr}.haplotypecaller.g.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/{chr}.haplotypecaller.g.vcf.gz.tbi",
+]
+description = "HaplotypeCaller in GVCF mode per chromosome (nf-core GATK4_HAPLOTYPECALLER -ERC GVCF with --intervals; joint scatter_gatk branch)"
+when = "config.scatter_gatk && config.joint_germline"
+log = "logs/gatk_haplotypecaller_gvcf_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+cp -L {config.out_dir}/intervals/{chr}.bed.gz .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" HaplotypeCaller --input {input[0]} --output {chr}.haplotypecaller.g.vcf.gz --reference reference.fasta --native-pair-hmm-threads 2 --dbsnp $(basename {config.dbsnp}) --tmp-dir . --pcr-indel-model {config.gatk_pcr_indel_model} -ERC GVCF --intervals {chr}.bed.gz
+mv {chr}.haplotypecaller.g.vcf.gz {chr}.haplotypecaller.g.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/{sample}/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_genomicsdbimport_scatter"
+input = ["{config.out_dir}/intervals/{chr}.bed.gz"]
+output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.joint/callset.json"]
+description = "GenomicsDBImport per chromosome (nf-core GATK4_GENOMICSDBIMPORT with --intervals; joint scatter_gatk branch)"
+when = "config.scatter_gatk && config.joint_germline"
+log = "logs/gatk_genomicsdbimport_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter
+cp -L {config.out_dir}/intervals/{chr}.bed.gz .
+GVCFS=""
+for v in {config.out_dir}/variant_calling/haplotypecaller/*/scatter/{chr}.haplotypecaller.g.vcf.gz; do GVCFS="$GVCFS --variant $v"; done
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GenomicsDBImport $GVCFS --genomicsdb-workspace-path {chr}.joint --intervals {chr}.bed.gz --genomicsdb-shared-posixfs-optimizations true --tmp-dir .
+mv {chr}.joint {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_genotypegvcfs_scatter"
+input = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.joint/callset.json",
+  "{config.out_dir}/intervals/{chr}.bed.gz",
+]
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.vcf.gz.tbi",
+]
+description = "GenotypeGVCFs per chromosome (nf-core GATK4_GENOTYPEGVCFS with --intervals; joint scatter_gatk branch)"
+when = "config.scatter_gatk && config.joint_germline"
+log = "logs/gatk_genotypegvcfs_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+cp -L {config.out_dir}/intervals/{chr}.bed.gz .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GenotypeGVCFs --variant gendb://{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.joint --output {chr}.vcf.gz --reference reference.fasta --dbsnp $(basename {config.dbsnp}) --genomicsdb-shared-posixfs-optimizations true --intervals {chr}.bed.gz --tmp-dir .
+mv {chr}.vcf.gz {chr}.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "bcftools_sort_joint_scatter"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.sort.vcf.gz"]
+description = "Sort the per-chromosome joint VCFs (nf-core BCFTOOLS_SORT; joint scatter_gatk branch)"
+when = "config.scatter_gatk && config.joint_germline"
+log = "logs/bcftools_sort_joint_scatter.log"
+scatter = { variable = "chr", values_from = "config.chromosomes" }
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter
+bcftools sort --output {chr}.sort.vcf.gz --temp-dir . --output-type z {input[0]}
+mv {chr}.sort.vcf.gz {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "gatk_mergevcfs_joint_scatter"
+input = []
+output = [
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz",
+  "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline.vcf.gz.tbi",
+]
+description = "Merge the per-chromosome joint VCFs (nf-core GATK4_MERGEVCFS; output paths = non-scatter joint branch)"
+when = "config.scatter_gatk && config.joint_germline"
+log = "logs/gatk_mergevcfs_joint_scatter.log"
+expand_inputs = [
+  { pattern = "{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/scatter/{chr}.sort.vcf.gz", variables = { chr = "config.chromosomes" } }
+]
+shell = """
+mkdir -p {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" MergeVcfs $(for v in {input}; do echo -n "--INPUT $v "; done) --OUTPUT joint_germline.vcf.gz --TMP_DIR .
+mv joint_germline.vcf.gz joint_germline.vcf.gz.tbi {config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 2
+memory = "8G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# ---------------------------------------------------------------------------
 # MULTIQC — nf-core/multiqc module; scans the results directory with the
 # upstream assets/multiqc_config.yml (fan-in over every report producer)
 # ---------------------------------------------------------------------------
@@ -1842,6 +2855,36 @@ depends_on = [
   "bcftools_mpileup_ngscheckmate",
   "ngscheckmate_ncm",
   "goleft_indexcov",
+  "bcftools_stats_freebayes",
+  "vcftools_tstv_count_freebayes",
+  "vcftools_tstv_qual_freebayes",
+  "vcftools_filter_summary_freebayes",
+  "ensemblvep_vep_freebayes",
+  "bcftools_stats_strelka",
+  "vcftools_tstv_count_strelka",
+  "vcftools_tstv_qual_strelka",
+  "vcftools_filter_summary_strelka",
+  "ensemblvep_vep_strelka",
+  "bcftools_stats_mpileup",
+  "vcftools_tstv_count_mpileup",
+  "vcftools_tstv_qual_mpileup",
+  "vcftools_filter_summary_mpileup",
+  "ensemblvep_vep_mpileup",
+  "bcftools_stats_deepvariant",
+  "vcftools_tstv_count_deepvariant",
+  "vcftools_tstv_qual_deepvariant",
+  "vcftools_filter_summary_deepvariant",
+  "ensemblvep_vep_deepvariant",
+  "bcftools_stats_manta",
+  "vcftools_tstv_count_manta",
+  "vcftools_tstv_qual_manta",
+  "vcftools_filter_summary_manta",
+  "ensemblvep_vep_manta",
+  "bcftools_stats_tiddit",
+  "vcftools_tstv_count_tiddit",
+  "vcftools_tstv_qual_tiddit",
+  "vcftools_filter_summary_tiddit",
+  "ensemblvep_vep_tiddit",
 ]
 output = ["{config.out_dir}/multiqc_report.html"]
 description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"

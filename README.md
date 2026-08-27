@@ -22,9 +22,11 @@ aligner (`aligner = "bwa-mem2"`), BAM output mode
 (`umi_read_structure = "3M2S+T"`), optional callers FreeBayes, Strelka2,
 Manta, bcftools mpileup, TIDDIT, goleft indexcov (WGS only), DeepVariant and
 NGSCheckMate (`call_*` / `tools_ngscheckmate`), and joint germline genotyping
-with VQSR (`joint_germline = true`). The default configuration reproduces the
-upstream default plan exactly — every added branch appears only as a skip
-until its flag is set.
+with VQSR (`joint_germline = true`), per-chromosome scatter/gather for the
+GATK steps (`scatter_gatk = true`), and per-caller VCF QC + VEP annotation
+(auto-enabled with each `call_*` caller). The default configuration
+reproduces the upstream default plan exactly — every added branch appears
+only as a skip until its flag is set.
 
 ## Installation
 
@@ -124,12 +126,12 @@ every ported optional branch (gated by config flags — all default-off).
 | GATK4_MARKDUPLICATES (BAM branch) | `gatk_markduplicates_bam` | gatk4 4.6.2.0 | `save_output_as_bam = true`; `--CREATE_INDEX true`, no CRAM conversion; `.md.bai` renamed to `.md.bam.bai` (upstream BAM_MERGE_INDEX_SAMTOOLS); downstream rules read `{config.alignment_ext}` / `{config.recal_index_ext}` (set `"bam"` / `"bam.bai"` together) |
 | MOSDEPTH (post-MD) | `mosdepth_md` | mosdepth 0.3.14 | ext.prefix `{meta.id}.md`; WGS `--by 500` mode |
 | SAMTOOLS_STATS (post-MD) | `samtools_stats_md` | samtools 1.24 | ext.prefix `{meta.id}.md.{alignment_ext}`; 1.24 is the version in the `htslib_samtools` stats/index images (the BWA image carries 1.22.1) |
-| GATK4_BASERECALIBRATOR | `gatk_baserecalibrator` | gatk4 4.6.2.0 | known-sites = dbsnp + Mills gold standard + known indels (GRCh38); single whole-genome job, no per-interval scatter (see deviations) |
-| GATK4_APPLYBQSR | `gatk_applybqsr` | gatk4 4.6.2.0 | output CRAM per default (BAM in the `save_output_as_bam` branch); single whole-genome job, no per-interval scatter (see deviations) |
+| GATK4_BASERECALIBRATOR | `gatk_baserecalibrator` | gatk4 4.6.2.0 | known-sites = dbsnp + Mills gold standard + known indels (GRCh38); single whole-genome job by default; per-chromosome jobs under `scatter_gatk = true` (see the scatter/gather row) |
+| GATK4_APPLYBQSR | `gatk_applybqsr` | gatk4 4.6.2.0 | output CRAM per default (BAM in the `save_output_as_bam` branch); single whole-genome job by default; per-chromosome jobs under `scatter_gatk = true` (see the scatter/gather row) |
 | SAMTOOLS_INDEX (recal) | `samtools_index_recal` | samtools 1.24 | indexes the recalibrated alignment (`.crai` or `.bam.bai`) |
 | MOSDEPTH (recal) | `mosdepth_recal` | mosdepth 0.3.14 | ext.prefix `{meta.id}.recal` |
 | SAMTOOLS_STATS (recal) | `samtools_stats_recal` | samtools 1.24 | ext.prefix `{meta.id}.recal.{alignment_ext}` |
-| GATK4_HAPLOTYPECALLER | `gatk_haplotypecaller` | gatk4 4.6.2.0 | default `tools=haplotypecaller,vep` → `call_haplotypecaller=true`; single-sample mode (no `-ERC GVCF`), `--pcr-indel-model CONSERVATIVE`; gated off when `joint_germline = true` (upstream picks the GVCF branch); single whole-genome job, no per-interval scatter (see deviations) |
+| GATK4_HAPLOTYPECALLER | `gatk_haplotypecaller` | gatk4 4.6.2.0 | default `tools=haplotypecaller,vep` → `call_haplotypecaller=true`; single-sample mode (no `-ERC GVCF`), `--pcr-indel-model CONSERVATIVE`; gated off when `joint_germline = true` (upstream picks the GVCF branch); single whole-genome job by default; per-chromosome jobs under `scatter_gatk = true` (see the scatter/gather row) |
 | GATK4_CNNSCOREVARIANTS | `gatk_cnnscorevariants` | gatk4 4.6.2.0 | VCF_VARIANT_FILTERING_GATK part 1; CNN 1D scoring (module default `--tensor-type 1D`); upstream keeps the `{sample}.cnn.vcf.gz` intermediate unpublished — the port stores it under `results/variant_calling/cnnscorevariants/` for DAG handoff; skipped in joint mode (upstream: no filtering of the joint VCF) |
 | GATK4_FILTERVARIANTTRANCHES | `gatk_filtervarianttranches` | gatk4 4.6.2.0 | VCF_VARIANT_FILTERING_GATK part 2; ext.args `--info-key CNN_1D`, ext.prefix `{meta.id}.haplotypecaller`, known sites (dbsnp + 2 GRCh38 indel sets) passed as `--resource`; produces `{sample}.haplotypecaller.filtered.vcf.gz` |
 | BCFTOOLS_STATS | `bcftools_stats` | bcftools 1.23.1 | VCF_QC_BCFTOOLS_VCFTOOLS part 1; runs on the filtered VCF (prefix `{meta.id}.haplotypecaller.filtered`) |
@@ -150,14 +152,14 @@ every ported optional branch (gated by config flags — all default-off).
 | BAM_VARIANT_CALLING_INDEXCOV (SAMTOOLS_REINDEX_BAM + GOLEFT_INDEXCOV) | `samtools_reindex_bam`, `goleft_indexcov` | samtools 1.24, goleft 0.2.4 | WGS only (`!wes && call_indexcov`); per-sample header-only reindex with `-F 3844 -q 30` + `--write-index` over `/dev/null##idx##`; cohort run `--fai --directory indexcov` (no `--extranormalize` — inputs are BAMs, matching upstream's reindex path); bed.gz+tbi published to `variant_calling/indexcov/` |
 | RUNDEEPVARIANT | `deepvariant` | deepvariant 1.10.0 | `call_deepvariant = true`; `--model_type=WGS --sample_name {sample}`; vcf + g.vcf pairs published to `variant_calling/deepvariant/{sample}/` |
 | BAM_NGSCHECKMATE (BCFTOOLS_MPILEUP + NGSCHECKMATE_NCM) | `bcftools_mpileup_ngscheckmate`, `ngscheckmate_ncm` | bcftools 1.23.1, ngscheckmate 1.0.1 | `tools_ngscheckmate = true`; per-sample mpileup `--no-version --ploidy 1 -c` with `-T` SNP bed, reheader to `{sample}-{lane}`; cohort `NCM_REF=./reference.fasta ncm.py -d . -bed <bed> -O . -N ngscheckmate -V`; outputs published to `reports/ngscheckmate/` (live-verify: ncm.py's exact output filenames, see Test) |
-| Joint germline (GATK4_HAPLOTYPECALLER GVCF, GATK4_GENOMICSDBIMPORT, GATK4_GENOTYPEGVCFS, BCFTOOLS_SORT, GATK4_MERGEVCFS, GATK4_VARIANTRECALIBRATOR SNP+INDEL, GATK4_APPLYVQSR SNP+INDEL) | `gatk_haplotypecaller_gvcf`, `gatk_genomicsdbimport`, `gatk_genotypegvcfs`, `bcftools_sort_joint`, `gatk_mergevcfs_joint`, `gatk_variantrecalibrator_snp`, `gatk_variantrecalibrator_indel`, `gatk_applyvqsr_snp`, `gatk_applyvqsr_indel` | gatk4 4.6.2.0, bcftools 1.23.1 | `joint_germline = true`; VQSR resource labels from `conf/igenomes.config` GRCh38 (1000G omni2.5 SNP → `known_snps`, dbsnp; gatk+mills indels); upstream prefixes `joint_variant_calling_SNP/INDEL` (VQSR intermediates unpublished upstream — the port keeps them under `results/` for DAG handoff); final `joint_germline_recalibrated.vcf.gz`; one whole-genome interval from the fasta `.fai` instead of per-contig scatter (see deviations) |
+| Joint germline (GATK4_HAPLOTYPECALLER GVCF, GATK4_GENOMICSDBIMPORT, GATK4_GENOTYPEGVCFS, BCFTOOLS_SORT, GATK4_MERGEVCFS, GATK4_VARIANTRECALIBRATOR SNP+INDEL, GATK4_APPLYVQSR SNP+INDEL) | `gatk_haplotypecaller_gvcf`, `gatk_genomicsdbimport`, `gatk_genotypegvcfs`, `bcftools_sort_joint`, `gatk_mergevcfs_joint`, `gatk_variantrecalibrator_snp`, `gatk_variantrecalibrator_indel`, `gatk_applyvqsr_snp`, `gatk_applyvqsr_indel` | gatk4 4.6.2.0, bcftools 1.23.1 | `joint_germline = true`; VQSR resource labels from `conf/igenomes.config` GRCh38 (1000G omni2.5 SNP → `known_snps`, dbsnp; gatk+mills indels); upstream prefixes `joint_variant_calling_SNP/INDEL` (VQSR intermediates unpublished upstream — the port keeps them under `results/` for DAG handoff); final `joint_germline_recalibrated.vcf.gz`; one whole-genome interval from the fasta `.fai` by default, per-chromosome under `scatter_gatk = true` (see the scatter/gather row) |
 | Joint VCF QC + VEP | `bcftools_stats_joint`, `vcftools_tstv_count_joint`, `vcftools_tstv_qual_joint`, `vcftools_filter_summary_joint`, `ensemblvep_vep_joint` | bcftools 1.23.1, vcftools 0.1.17, ensembl-vep 112.0 | upstream runs VCF_QC + VEP on the joint VCF (`vcf_all`); the per-sample QC/VEP rules are gated off in joint mode and these cohort rules take over (prefix `joint_germline_recalibrated`) |
 | MULTIQC | `multiqc` | multiqc 1.35 | fan-in over all report producers (depends_on covers the gated branches — skipped rules auto-satisfy); scans the results dir with the upstream `assets/multiqc_config.yml` |
-| BED_PREPARE_INTERVALS + per-interval scatter/gather (GATK4_GATHERBQSRREPORTS, CRAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS, joint per-interval GenotypeGVCFs) | — not ported | — | **structural**: the engine has no per-contig interval fan-out (a rule's outputs are fixed paths, not per-interval channel files). The port runs single whole-genome GATK jobs without `--intervals` (gathers are exact — results are equivalent, but the upstream per-contig parallelism is absent) |
+| PREPARE_INTERVALS (BUILD_INTERVALS, CREATE_INTERVALS_BED, TABIX_BGZIPTABIX) + per-interval scatter/gather of BQSR / ApplyBQSR / HaplotypeCaller / joint GenotypeGVCFs (GATK4_GATHERBQSRREPORTS, CRAM/BAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS) | `create_intervals_bed`, `tabix_interval`, `gatk_baserecalibrator_scatter`, `gatk_gatherbqsrreports`, `gatk_applybqsr_scatter`, `merge_index_samtools`, `gatk_haplotypecaller_scatter`, `gatk_mergevcfs_scatter`, `gatk_haplotypecaller_gvcf_scatter`, `gatk_genomicsdbimport_scatter`, `gatk_genotypegvcfs_scatter`, `bcftools_sort_joint_scatter`, `gatk_mergevcfs_joint_scatter` | gawk 5.3.0, samtools 1.24, gatk4 4.6.2.0 | `scatter_gatk = true` (default off). Deviation: the engine's scatter fan-out takes a **static** value list, so intervals are one per chromosome (`config.chromosomes` — keep it in sync with the fasta `.fai`) instead of upstream's duration-binned windows (`nucleotides_per_second`); every downstream gather is exact and writes the same paths as the single-job branch, so results are identical — the branch adds per-contig parallelism, it does not change outputs. Needs live verification (see Test) |
 | fastp split parts beyond `0001.` (multi-part BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS) | — not ported | — | **structural**: upstream's channel fan-out over split parts cannot be expressed as fixed output paths; the port caps input at one split part (~50M read pairs / 200M lines per sample). **Do not run WGS data above the cap** with this port |
 | Somatic callers (Mutect2, somatic Strelka2/Manta, CNVkit, ASCAT, MSIsensor2/pro, SomaticSniper, VarDict, Control-FREEC, LoFreq, Varlociraptor) | — not ported | — | tumor/normal **pairs required**; the port's samplesheet is single-sample germline (`[[sample_groups]]`; the engine's `[[pairs]]` mechanism is a possible follow-up) |
 | Sentieon / Parabricks / DRAGMAP | — not ported | — | commercial accelerators (licensed binaries); out of scope |
-| VCF_QC + ENSEMBLVEP_VEP fan-out over non-Haplotypecaller callers | — not ported | — | when an optional caller (FreeBayes, Strelka2, ...) is enabled, its VCF is produced but not QC'd/annotated — upstream runs VCF_QC and VEP on every caller VCF (`vcf_all`); the port's QC/VEP rules are haplotypecaller-scoped (incl. the joint VCF) |
+| VCF_QC + ENSEMBLVEP_VEP fan-out over the optional callers | `bcftools_stats_{freebayes,strelka,mpileup,deepvariant,manta,tiddit}`, `vcftools_tstv_count_{...}`, `vcftools_tstv_qual_{...}`, `vcftools_filter_summary_{...}`, `ensemblvep_vep_{...}` | bcftools 1.23.1, vcftools 0.1.17, ensembl-vep 112.0 | upstream runs VCF_QC + VEP on every caller VCF (`vcf_all`); the port now mirrors that: when `call_freebayes`/`call_strelka`/`call_mpileup`/`call_deepvariant`/`call_manta`/`call_tiddit` enables a caller, its VCF is QC'd (`reports/bcftools/<caller>/`, `reports/vcftools/<caller>/`) and annotated (`annotation/<caller>/`) with the same prefix conventions as the haplotypecaller rules; tiddit's uncompressed `.vcf` uses `--vcf` instead of `--gzvcf` (as upstream). All 30 rules are gated on their caller's flag (+ `skip_bcftools`/`skip_vcftools`/`annotate_vep`/`vep_cache_ready`) and feed the multiqc `depends_on`. Needs live verification (see Test) |
 
 Deviations (all documented, nothing silently dropped):
 
@@ -171,12 +173,18 @@ Deviations (all documented, nothing silently dropped):
   merges the part BAMs before MarkDuplicates (`BAM_MERGE_INDEX_SAMTOOLS`),
   which this port does not reproduce — **do not run WGS data above ~50M read
   pairs per sample** with this port until the multi-part path is wired.
-- **no per-interval scatter/gather**: BQSR, ApplyBQSR, HaplotypeCaller (and
-  joint GenotypeGVCFs) run as single whole-genome jobs (one interval built
-  from the fasta `.fai` for the joint path; no `--intervals` otherwise; no
-  GATK4_GATHERBQSRREPORTS / CRAM_MERGE_INDEX_SAMTOOLS / GATK4_MERGEVCFS).
-  Gathers are exact, so the results are mathematically equivalent to
-  upstream's, but wall-time and per-contig parallelism differ substantially.
+- **scatter/gather is opt-in and uses per-chromosome intervals**: the
+  upstream per-interval fan-out (duration-binned windows) becomes
+  `scatter_gatk = true` in the port — one interval per chromosome (the
+  engine's scatter needs a static value list, so `config.chromosomes`
+  replaces upstream's `nucleotides_per_second` binning; both split a
+  whole-genome interval set, but per-chromosome granularity is coarser).
+  Off by default: BQSR, ApplyBQSR, HaplotypeCaller (and joint
+  GenotypeGVCFs) run as single whole-genome jobs (one interval from the
+  fasta `.fai` for the joint path). Every gather (GatherBQSRReports,
+  samtools merge+index, MergeVcfs) writes the same output paths in both
+  branches, so the branches are exchangeable without touching downstream
+  rules.
 - **BAM_CONVERT_SAMTOOLS collapse (UMI path)**: at this upstream commit the
   four `samtools view` calls in `bam_convert_samtools` have no distinguishing
   `-f/-F` flags anywhere in `conf/` (grep-verified), so the view → merge →
@@ -211,6 +219,21 @@ bash test/run.sh
 
 Runs `oxo-flow validate`, `oxo-flow lint` and a `dry-run` smoke check; CI runs
 the same script on every push.
+
+The two newest gated branches need live verification (container runs, not yet
+performed — planned as a follow-up wave):
+
+- `scatter_gatk = true` (per-chromosome BQSR/ApplyBQSR/Haplotypecaller/joint
+  GenotypeGVCFs + the GatherBQSRReports / samtools merge+index / MergeVcfs
+  gathers) — dry-run covers both `joint_germline` modes;
+- the per-caller VCF_QC + VEP fan-out (30 rules over
+  `call_freebayes`/`call_strelka`/`call_mpileup`/`call_deepvariant`/
+  `call_manta`/`call_tiddit`) — dry-run covers all six callers at once;
+  tiddit's `--vcf` vcftools invocation in particular needs a live check.
+
+A reasonable smoke sequence: `scatter_gatk=true` on the existing live-verified
+germline dataset (results must be byte-identical to the default branch), then
+one optional caller with QC+VEP on a small WES slice.
 
 ## License
 
