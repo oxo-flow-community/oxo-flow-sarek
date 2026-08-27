@@ -16,10 +16,10 @@
   "tags": ["wgs", "wes", "germline", "somatic", "variant-calling", "gatk", "bwa", "bwa-mem2", "vep", "umi", "nf-core"],
   "scope": [
     "bwa_index", "bwamem2_index", "gatk_createsequencedictionary", "samtools_faidx",
-    "fastqc", "fastp",
+    "fastqc", "fastp", "fastp_split",
     "fgbio_fastqtobam", "samtools_bam2fq_umi", "bwa_mem_umi", "fgbio_groupreadsbyumi",
     "fgbio_callmolecularconsensusreads", "samtools_bam2fq_consensus", "fastp_umi",
-    "bwa_mem", "bwa_mem2",
+    "bwa_mem", "bwa_mem2", "bwa_mem_split", "bwa_mem2_split", "bam_merge_index_samtools",
     "gatk_markduplicates", "gatk_markduplicates_bam",
     "mosdepth_md", "samtools_stats_md",
     "gatk_baserecalibrator", "gatk_applybqsr",
@@ -49,11 +49,10 @@
     "multiqc"
   ],
   "excluded": [
-    "fastp split parts beyond 0001 (multi-part BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS) — structurally impossible: the number of split parts is data-dependent (upstream splits on read-count), and the engine cannot fan out over files produced during the same run (rule outputs are fixed paths; scatter needs a static value list); input is capped at one split part (~50M read pairs / 200M lines per sample)",
     "somatic callers (Mutect2, somatic Strelka2/Manta, CNVkit, ASCAT, MSIsensor2/pro, SomaticSniper, VarDict, Control-FREEC, LoFreq, Varlociraptor) — tumor/normal pairs required; the port samplesheet is single-sample germline (engine [[pairs]] is a possible follow-up)",
     "Sentieon / Parabricks / DRAGMAP — commercial accelerators (licensed binaries), out of scope"
   ],
-  "rule_count": 105,
+  "rule_count": 109,
   "tools": [
     "fastqc",
     "fastp",
@@ -77,7 +76,7 @@
     "gawk",
     "multiqc"
   ],
-  "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM (or BWA-MEM2) alignment, MarkDuplicates with CRAM or BAM output, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling with CNN 1D scoring and tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report. Optional ported branches (all gated off by default): reference preparation (BWA/BWAmem2 index, .dict, .fai), UMI-aware consensus calling (fgbio chain + fastp), FreeBayes, Strelka2 germline, Manta germline, bcftools mpileup, TIDDIT SV, goleft indexcov, DeepVariant, NGSCheckMate sample-identity QC, the joint-germline path (GVCF mode + GenomicsDBImport + GenotypeGVCFs + VQSR), per-caller VCF QC + VEP annotation (upstream fan-out over every enabled caller), and the per-chromosome scatter/gather branch (scatter_gatk=true) that ports upstream interval preparation + GATK4_GATHERBQSRREPORTS / CRAM/BAM_MERGE_INDEX_SAMTOOLS / GATK4_MERGEVCFS with one job per chromosome.",
+  "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM (or BWA-MEM2) alignment, MarkDuplicates with CRAM or BAM output, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling with CNN 1D scoring and tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report. Optional ported branches (all gated off by default): reference preparation (BWA/BWAmem2 index, .dict, .fai), UMI-aware consensus calling (fgbio chain + fastp), fastp split-parts fan-out (split_parts=true: runtime-discovered per-part BWA-MEM/BWA-MEM2 alignment + BAM merge + index, no input cap), FreeBayes, Strelka2 germline, Manta germline, bcftools mpileup, TIDDIT SV, goleft indexcov, DeepVariant, NGSCheckMate sample-identity QC, the joint-germline path (GVCF mode + GenomicsDBImport + GenotypeGVCFs + VQSR), per-caller VCF QC + VEP annotation (upstream fan-out over every enabled caller), and the per-chromosome scatter/gather branch (scatter_gatk=true) that ports upstream interval preparation + GATK4_GATHERBQSRREPORTS / CRAM/BAM_MERGE_INDEX_SAMTOOLS / GATK4_MERGEVCFS with one job per chromosome.",
   "installation": {
     "engine": "oxo-flow >= 0.12.0",
     "toolchain": "containers (Docker) — pinned images",
@@ -89,7 +88,7 @@
       "VEP cache (GRCh38, homo_sapiens, cache version 112) mounted at /.vep in the container",
       "NGSCheckMate SNP bed (ngscheckmate_bed) when tools_ngscheckmate = true",
       "compute: up to 24 CPUs / 36 GB per rule (BWA-MEM 24 threads/30G; VEP 6 threads/36G)",
-      "input cap: ~50M read pairs per sample (fastp split, see fidelity deviations)",
+      "input cap: ~50M read pairs per sample when split_parts = false (fastp single-part mode); no cap with split_parts = true (runtime-discovered fan-out, requires mapped_bam = \"sorted\")",
       "scatter_gatk = true: config.chromosomes must match the fasta .fai contigs",
       "disk: results/ for per-sample CRAMs/VCFs/reports, plus the reference bundle and VEP cache"
     ]
