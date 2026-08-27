@@ -2612,7 +2612,10 @@ expand_inputs = [
 shell = """
 mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
-samtools merge --threads {effective_threads} --reference reference.fasta {sample}.recal.{config.alignment_ext} {input}
+# CRAM 3.0 like the markduplicates rule (line ~592): the GATK 4.5 reader
+# in envs/gatk4.yaml rejects CRAM 3.1, which samtools 1.24 writes by
+# default. Live-caught on tx-ubuntu 2026-08-27 (gatk_haplotypecaller_scatter).
+samtools merge --threads {effective_threads} --reference reference.fasta -O cram,version=3.0 {sample}.recal.{config.alignment_ext} {input}
 samtools index {sample}.recal.{config.alignment_ext}
 mv {sample}.recal.{config.alignment_ext} {sample}.recal.{config.recal_index_ext} {config.out_dir}/recalibrated/{sample}/
 """
