@@ -156,23 +156,25 @@ every ported optional branch (gated by config flags — all default-off).
 | Joint VCF QC + VEP | `bcftools_stats_joint`, `vcftools_tstv_count_joint`, `vcftools_tstv_qual_joint`, `vcftools_filter_summary_joint`, `ensemblvep_vep_joint` | bcftools 1.23.1, vcftools 0.1.17, ensembl-vep 112.0 | upstream runs VCF_QC + VEP on the joint VCF (`vcf_all`); the per-sample QC/VEP rules are gated off in joint mode and these cohort rules take over (prefix `joint_germline_recalibrated`) |
 | MULTIQC | `multiqc` | multiqc 1.35 | fan-in over all report producers (depends_on covers the gated branches — skipped rules auto-satisfy); scans the results dir with the upstream `assets/multiqc_config.yml` |
 | PREPARE_INTERVALS (BUILD_INTERVALS, CREATE_INTERVALS_BED, TABIX_BGZIPTABIX) + per-interval scatter/gather of BQSR / ApplyBQSR / HaplotypeCaller / joint GenotypeGVCFs (GATK4_GATHERBQSRREPORTS, CRAM/BAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS) | `create_intervals_bed`, `tabix_interval`, `gatk_baserecalibrator_scatter`, `gatk_gatherbqsrreports`, `gatk_applybqsr_scatter`, `merge_index_samtools`, `gatk_haplotypecaller_scatter`, `gatk_mergevcfs_scatter`, `gatk_haplotypecaller_gvcf_scatter`, `gatk_genomicsdbimport_scatter`, `gatk_genotypegvcfs_scatter`, `bcftools_sort_joint_scatter`, `gatk_mergevcfs_joint_scatter` | gawk 5.3.0, samtools 1.24, gatk4 4.5.0.0 | `scatter_gatk = true` (default off). Deviation: the engine's scatter fan-out takes a **static** value list, so intervals are one per chromosome (`config.chromosomes` — keep it in sync with the fasta `.fai`) instead of upstream's duration-binned windows (`nucleotides_per_second`); every downstream gather is exact and writes the same paths as the single-job branch, so results are identical — the branch adds per-contig parallelism, it does not change outputs. Live-verified on tx-ubuntu 2026-08-27 (`scatter_gatk=true`, 13 rules + gathers, 0 failed; surfaced + fixed the CRAM 3.0 merge issue — see Test) |
-| fastp split parts beyond `0001.` (multi-part BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS) | — not ported | — | **structural**: upstream's channel fan-out over split parts cannot be expressed as fixed output paths; the port caps input at one split part (~50M read pairs / 200M lines per sample). **Do not run WGS data above the cap** with this port |
+| fastp split parts (multi-part BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS) | `fastp_split`, `bwa_mem_split`, `bwa_mem2_split`, `bam_merge_index_samtools` | fastp 1.1.0, bwa 0.7.19 / bwa-mem2, samtools 1.24 | `split_parts = true` (default off) — fastp's `--split_by_lines` parts are enumerated at runtime via the engine's `output_pattern` primitive (data-dependent part count, exactly like upstream's channel scan) and the per-part BWA_MEM/BWA_MEM2 + BAM_MERGE_INDEX_SAMTOOLS fan-out is reproduced: every part is aligned (`{sample}.NNNN.bam`, upstream prefix `{meta.id}.{token}`) and merged + indexed into `{sample}.sorted.bam` (upstream MERGE_BAM prefix `{meta.id}.sorted`) before MarkDuplicates — no input cap. Requires `mapped_bam = "sorted"`; not supported with `umi_read_structure`. See the deviation note below for the merge gating design. Requires the engine's output_pattern primitive (Traitome/oxo-flow#235) — unreleased as of v0.16.0, ships in the next engine release |
 | Somatic callers (Mutect2, somatic Strelka2/Manta, CNVkit, ASCAT, MSIsensor2/pro, SomaticSniper, VarDict, Control-FREEC, LoFreq, Varlociraptor) | — not ported | — | tumor/normal **pairs required**; the port's samplesheet is single-sample germline (`[[sample_groups]]`; the engine's `[[pairs]]` mechanism is a possible follow-up) |
 | Sentieon / Parabricks / DRAGMAP | — not ported | — | commercial accelerators (licensed binaries); out of scope |
 | VCF_QC + ENSEMBLVEP_VEP fan-out over the optional callers | `bcftools_stats_{freebayes,strelka,mpileup,deepvariant,manta,tiddit}`, `vcftools_tstv_count_{...}`, `vcftools_tstv_qual_{...}`, `vcftools_filter_summary_{...}`, `ensemblvep_vep_{...}` | bcftools 1.23.1, vcftools 0.1.17, ensembl-vep 112.0 | upstream runs VCF_QC + VEP on every caller VCF (`vcf_all`); the port now mirrors that: when `call_freebayes`/`call_strelka`/`call_mpileup`/`call_deepvariant`/`call_manta`/`call_tiddit` enables a caller, its VCF is QC'd (`reports/bcftools/<caller>/`, `reports/vcftools/<caller>/`) and annotated (`annotation/<caller>/`) with the same prefix conventions as the haplotypecaller rules; tiddit's uncompressed `.vcf` uses `--vcf` instead of `--gzvcf` (as upstream). All 30 rules are gated on their caller's flag (+ `skip_bcftools`/`skip_vcftools`/`annotate_vep`/`vep_cache_ready`) and feed the multiqc `depends_on`. Needs live verification (see Test) |
 
 Deviations (all documented, nothing silently dropped):
 
-- **fastp split parts — supported input cap**: upstream `--split_by_lines`
-  produces `0001.`-prefixed outputs; only the first split part (`0001.`) is
-  wired to BWA-MEM (the nf-core bwa/mem prefix logic `tokenize('.')[0]` gives
-  `{sample}.0001.bam`). The supported input size is therefore capped at one
-  split part — ~50M read pairs / 200M lines per sample (the upstream default
-  `split_fastq=50,000,000` threshold). Datasets above the threshold are a
-  **known unsupported upstream behavior**: upstream aligns every part and
-  merges the part BAMs before MarkDuplicates (`BAM_MERGE_INDEX_SAMTOOLS`),
-  which this port does not reproduce — **do not run WGS data above ~50M read
-  pairs per sample** with this port until the multi-part path is wired.
+- **fastp split parts — runtime-discovered fan-out (`split_parts = true`)**: the
+  engine has no fan-in/collection over runtime-discovered values (output_pattern
+  v1), so the per-sample merge is a plan-time rule whose shell waits for the
+  deterministic part count — fastp's parts are 1:1 with the part BAMs and
+  `fastp_split`'s final `mv` lands all parts at once — then runs
+  BAM_MERGE_INDEX_SAMTOOLS exactly once. A failed per-part alignment fails the
+  run (fail-fast cancels the waiting merge), so the wait cannot hang on a
+  healthy pipeline. `split_parts` is off by default and the default path is
+  unchanged: single part `0001.` -> `{sample}.0001.bam` (the upstream
+  `tokenize('.')[0]` behavior), so small/medium inputs never see the new
+  machinery. UMI consensus mode (`umi_read_structure`) is not supported with
+  `split_parts` — the two gates are mutually exclusive.
 - **scatter/gather is opt-in and uses per-chromosome intervals**: the
   upstream per-interval fan-out (duration-binned windows) becomes
   `scatter_gatk = true` in the port — one interval per chromosome (the

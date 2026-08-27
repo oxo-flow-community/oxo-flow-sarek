@@ -36,6 +36,13 @@ genome = "GRCh38"
 aligner = "bwa-mem"
 trim_fastq = false
 split_fastq = 50000000          # fastp --split_by_lines = split_fastq * 4
+# Runtime-discovered split parts: when true, fastp's --split_by_lines parts
+# are discovered by filesystem scan (engine output_pattern primitive) and the
+# BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS stages fan out per part — no 0001-only
+# cap. Requires mapped_bam = "sorted" (the merge output name). Not supported
+# with umi_read_structure. Off by default (upstream single-part behavior).
+split_parts = false
+mapped_bam = "0001"             # mapped bam stem fed to markduplicates: {sample}.{mapped_bam}.bam ("sorted" with split_parts = true)
 length_required = 15
 wes = false
 save_output_as_bam = false      # CRAM output mode (upstream default)
@@ -299,8 +306,40 @@ output = [
   "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.html",
   "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.log",
 ]
-description = "Read trimming and splitting (nf-core FASTP; --split_by_lines = 4 x split_fastq)"
-when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure == ''"
+description = "Read trimming and splitting (nf-core FASTP; --split_by_lines = 4 x split_fastq; single-part path — see fastp_split for the runtime-discovered multi-part path)"
+when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure == '' && !config.split_parts"
+shell = """
+[ ! -f  {sample}-{config.lane}_R1.fastq.gz ] && ln -sf raw/{sample}_R1.fastq.gz {sample}-{config.lane}_R1.fastq.gz
+[ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
+fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
+mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
+mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "4G"
+
+[rules.environment]
+conda = "envs/fastp.yaml"
+
+# ---------------------------------------------------------------------------
+# FASTP (split-parts branch) — the same module with split parts discovered at
+# runtime: the rule declares output_pattern (engine primitive #235) instead of
+# fixed outputs; after each sample's fastp finishes, the engine walks
+# preprocessing/fastp/<sample>/ and binds {part} to every 0001.NNNN R1 part.
+# bwa_mem_split / bwa_mem2_split then instantiate per {part} value. The fastp
+# reports (json/html/log) are written to the same paths as the single-part
+# rule but are untracked (output_pattern rules cannot declare fixed outputs);
+# multiqc still picks them up by scanning.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "fastp_split"
+input = ["raw/{sample}_R1.fastq.gz", "raw/{sample}_R2.fastq.gz"]
+output_pattern = "{config.out_dir}/preprocessing/fastp/{sample}/{part}.{sample}-{config.lane}_R1.fastp.fastq.gz"
+description = "Read trimming and splitting into runtime-discovered parts (nf-core FASTP with --split_by_lines; split parts enumerated by filesystem scan — {part} is fresh and per-part consumers instantiate per discovered value)"
+when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure == '' && config.split_parts"
 shell = """
 [ ! -f  {sample}-{config.lane}_R1.fastq.gz ] && ln -sf raw/{sample}_R1.fastq.gz {sample}-{config.lane}_R1.fastq.gz
 [ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
@@ -483,8 +522,8 @@ output = [
   "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.html",
   "{config.out_dir}/reports/fastp/{sample}/{sample}-{config.lane}.fastp.log",
 ]
-description = "Read trimming and splitting of UMI consensus reads (nf-core FASTP on the consensus pair; outputs shared with the fastp rule — the two are mutually exclusive via when)"
-when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure != ''"
+description = "Read trimming and splitting of UMI consensus reads (nf-core FASTP on the consensus pair; outputs shared with the fastp rule — the two are mutually exclusive via when; split_parts not supported on the UMI path)"
+when = "(config.trim_fastq || config.split_fastq > 0) && config.umi_read_structure != '' && !config.split_parts"
 log = "logs/fastp_umi.log"
 shell = """
 [ ! -f {sample}-{config.lane}_R1.fastq.gz ] && ln -sf {config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_1.fq.gz {sample}-{config.lane}_R1.fastq.gz
@@ -513,8 +552,8 @@ input = [
   "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
 ]
 output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
-description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-K 100000000 -Y -R <read_group>')"
-when = "config.aligner == 'bwa-mem'"
+description = "BWA-MEM alignment + coordinate sort (nf-core BWA_MEM, ext.args '-K 100000000 -Y -R <read_group>'; single-part path — see bwa_mem_split for the per-part fan-out)"
+when = "config.aligner == 'bwa-mem' && !config.split_parts"
 shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
 for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
@@ -525,6 +564,37 @@ INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
 # memory for bam_mem' on a 4G box).
 bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.0001.bam -
 mv {sample}.0001.bam {config.out_dir}/preprocessing/mapped/{sample}/
+"""
+
+[rules.resources]
+threads = 24
+memory = "30G"
+
+[rules.environment]
+conda = "envs/bwa-samtools.yaml"
+
+# ---------------------------------------------------------------------------
+# BWA_MEM (split-parts branch) — one instance per fastp split part. The rule
+# consumes the fresh {part} wildcard, so the engine instantiates it only after
+# every fastp_split instance completed. The per-part bam names match the
+# upstream BWA_MEM prefix '{meta.id}.{token}' (token = the fastp part number);
+# bam_merge_index_samtools picks the part bams up by count/glob.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_mem_split"
+input = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/{part}.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/{part}.{sample}-{config.lane}_R2.fastp.fastq.gz",
+]
+output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.{part}.bam"]
+description = "Per-part BWA-MEM alignment + coordinate sort (nf-core BWA_MEM on one split part; instantiated once per runtime-discovered {part} value)"
+when = "config.aligner == 'bwa-mem' && config.split_parts"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
+for f in {config.bwa_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
+bwa mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.{part}.bam -
+mv {sample}.{part}.bam {config.out_dir}/preprocessing/mapped/{sample}/
 """
 
 [rules.resources]
@@ -546,8 +616,8 @@ input = [
   "{config.out_dir}/preprocessing/fastp/{sample}/0001.{sample}-{config.lane}_R2.fastp.fastq.gz",
 ]
 output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
-description = "BWA-MEM2 alignment + coordinate sort (nf-core BWAMEM2_MEM, ext.args '-K 100000000 -Y -R <read_group>')"
-when = "config.aligner == 'bwa-mem2'"
+description = "BWA-MEM2 alignment + coordinate sort (nf-core BWAMEM2_MEM, ext.args '-K 100000000 -Y -R <read_group>'; single-part path — see bwa_mem2_split for the per-part fan-out)"
+when = "config.aligner == 'bwa-mem2' && !config.split_parts"
 log = "logs/bwa_mem2.log"
 shell = """
 mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
@@ -565,13 +635,84 @@ memory = "30G"
 singularity = "docker://community.wave.seqera.io/library/bwa-mem2_htslib_samtools:db98f81f55b64113"
 
 # ---------------------------------------------------------------------------
+# BWA_MEM2 (split-parts branch) — bwa-mem2 counterpart of bwa_mem_split
+# (shares the same per-part bam path; the two are mutually exclusive via when).
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bwa_mem2_split"
+input = [
+  "{config.out_dir}/preprocessing/fastp/{sample}/{part}.{sample}-{config.lane}_R1.fastp.fastq.gz",
+  "{config.out_dir}/preprocessing/fastp/{sample}/{part}.{sample}-{config.lane}_R2.fastp.fastq.gz",
+]
+output = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.{part}.bam"]
+description = "Per-part BWA-MEM2 alignment + coordinate sort (nf-core BWAMEM2_MEM on one split part; instantiated once per runtime-discovered {part} value)"
+when = "config.aligner == 'bwa-mem2' && config.split_parts"
+log = "logs/bwa_mem2_split.log"
+shell = """
+mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
+for f in {config.bwa_mem2_index_dir}/*; do [ -f "$f" ] && cp -L "$f" .; done
+INDEX=$(find -L ./ -name "*.amb" | head -1 | sed 's/\\.amb$//')
+bwa-mem2 mem -K 100000000 -Y -R "@RG\\tID:{sample}.{config.lane}\\tPU:{config.lane}\\tSM:{config.patient}_{sample}\\tLB:{sample}\\tDS:{config.fasta}\\tPL:{config.seq_platform}" -t {effective_threads} $INDEX {input[0]} {input[1]} | samtools sort --threads {effective_threads} -m 512M -o {sample}.{part}.bam -
+mv {sample}.{part}.bam {config.out_dir}/preprocessing/mapped/{sample}/
+"""
+
+[rules.resources]
+threads = 24
+memory = "30G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/bwa-mem2_htslib_samtools:db98f81f55b64113"
+
+# ---------------------------------------------------------------------------
+# BAM_MERGE_INDEX_SAMTOOLS (split-parts branch) — the per-sample merge of the
+# per-part aligned bams (upstream BAM_MERGE_INDEX_SAMTOOLS, MERGE_BAM prefix
+# '{meta.id}.sorted'). The rule is a PLAN-TIME per-sample rule (no fresh
+# wildcard), so the downstream rules get normal DAG edges from its outputs.
+# Its shell waits for the deterministic part count — the fastp parts are 1:1
+# with the part bams, and fastp_split's final `mv` lands all parts at once —
+# then merges exactly once (no redundant merges, no concurrent writers).
+# The engine's fail-fast cancels a waiting merge if a bwa_mem_split instance
+# fails before the count is reached. The merged bam then feeds markduplicates
+# via config.mapped_bam = "sorted".
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "bam_merge_index_samtools"
+input = []
+output = [
+  "{config.out_dir}/preprocessing/mapped/{sample}/{sample}.sorted.bam",
+  "{config.out_dir}/preprocessing/mapped/{sample}/{sample}.sorted.bam.bai",
+]
+description = "Merge per-part aligned bams + index (upstream BAM_MERGE_INDEX_SAMTOOLS; waits for the part count from fastp_split, then merges the complete part set once)"
+when = "config.split_parts"
+shell = """
+# Wait for the fastp parts (fastp_split's final mv lands all of them at once),
+# then for the 1:1 part bams; the engine cancels this rule on fail-fast if a
+# bwa_mem_split / bwa_mem2_split instance fails before the count is reached.
+while ! ls {config.out_dir}/preprocessing/fastp/{sample}/*_R1.fastp.fastq.gz >/dev/null 2>&1; do sleep 15; done
+expected=$(ls {config.out_dir}/preprocessing/fastp/{sample}/*_R1.fastp.fastq.gz | wc -l | tr -d ' ')
+while [ "$(find {config.out_dir}/preprocessing/mapped/{sample} -maxdepth 1 -name '{sample}.*.bam' ! -name '{sample}.sorted.bam' 2>/dev/null | wc -l | tr -d ' ')" -lt "$expected" ]; do sleep 15; done
+mkdir -p {config.out_dir}/preprocessing/mapped/{sample}
+cd {config.out_dir}/preprocessing/mapped/{sample}
+bams=$(find . -maxdepth 1 -name '{sample}.*.bam' ! -name '{sample}.sorted.bam' | sort)
+samtools merge --threads {effective_threads} -o {sample}.sorted.bam $bams
+samtools index {sample}.sorted.bam
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+# ---------------------------------------------------------------------------
 # GATK4_MARKDUPLICATES — nf-core/gatk4/markduplicates module
 # (ext.args '--REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT',
 # ext.prefix '{meta.id}.md.cram', CRAM conversion via samtools)
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "gatk_markduplicates"
-input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.{config.mapped_bam}.bam"]
 output = [
   "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram",
   "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.cram.crai",
@@ -611,7 +752,7 @@ conda = "envs/gatk4.yaml"
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "gatk_markduplicates_bam"
-input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.0001.bam"]
+input = ["{config.out_dir}/preprocessing/mapped/{sample}/{sample}.{config.mapped_bam}.bam"]
 output = [
   "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.bam",
   "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.bam.bai",
@@ -2836,6 +2977,7 @@ depends_on = [
   "fastqc",
   "fastp",
   "fastp_umi",
+  "fastp_split",
   "gatk_markduplicates",
   "gatk_markduplicates_bam",
   "mosdepth_md",
