@@ -26,6 +26,12 @@ name = "oxo-flow-sarek"
 version = "1.0.0"
 description = "WGS/WES germline and somatic variant calling — oxo-flow port of nf-core/sarek 3.10.0: QC, trimming/splitting, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, VEP annotation, MultiQC"
 author = "oxo-flow-community"
+# Tumor/normal pairs for the somatic callers (issue: somatic wave). The
+# shipped file is header-only: with call_mutect2=false (default) no somatic
+# instance exists and the run is byte-identical to the germline-only port.
+# Fill the sheet (pair_id, experiment=tumor, control=normal; control empty
+# for tumor-only) and flip the call_*_somatic booleans to enable.
+pairs_file = "config/somatic_pairs.tsv"
 
 # Upstream nextflow.config params that drive the default path. Every value is
 # the upstream default (nf-core/sarek 3.10.0); `tools` is expressed as
@@ -114,6 +120,22 @@ call_mpileup = false
 call_tiddit = false
 call_indexcov = false       # upstream runs indexcov on WGS only (germline)
 call_deepvariant = false
+# Somatic variant calling (upstream tools 'mutect2,strelka2,manta' on a
+# tumor/normal samplesheet; the germline chain above runs for every sample
+# including pair members). Pairs come from [workflow].pairs_file — the repo
+# ships config/somatic_pairs.tsv (header-only = no somatic instances; fill it
+# with pair_id/experiment/control rows, experiment=tumor, control=normal).
+# Tumor-only: leave control empty in the sheet — Mutect2 runs tumor-only
+# (Strelka2/Manta somatic are paired-only upstream and stay off for those
+# pairs). PoN / gnomAD contamination panels are a separate resource step
+# (contamination_estimation uses the tumor-normal pileups instead).
+call_mutect2 = false
+call_strelka_somatic = false
+call_manta_somatic = false
+# CalculateContamination: GetPileupSummaries + CalculateContamination on the
+# pair, feeding FilterMutectCalls --contamination-table (upstream
+# contamination_estimation; requires a paired sample).
+contamination_estimation = false
 tools_ngscheckmate = false
 freebayes_filter = 30        # upstream params.freebayes_filter
 ngscheckmate_bed = "/data/references/GRCh38/Annotation/NGSCheckMate/SNP_GRCh38_hg38_wChr.bed"
@@ -1388,6 +1410,289 @@ memory = "4G"
 
 [rules.environment]
 singularity = "docker://quay.io/biocontainers/goleft:0.2.4--h9ee0642_1"
+
+# ===========================================================================
+# SOMATIC VARIANT CALLING (upstream nf-core/sarek 3.10.0 somatic path)
+# Pairs come from config/somatic_pairs.tsv (pair_id, experiment=tumor,
+# control=normal; control empty = tumor-only). All rules are pair-fanned
+# via [[pairs]] expansion ({experiment}_vs_{control}/{experiment}/{control}) and gated by
+# the call_*_somatic booleans (default false: with the header-only sheet
+# no somatic instance exists and the run is byte-identical to the
+# germline-only port). Pair members are ordinary samples — add them to the
+# cohort sample set so the germline chain produces their recalibrated BAMs.
+# PoN / gnomAD panels are NOT wired (separate resource step); the
+# contamination branch uses the pair's own pileups.
+# ===========================================================================
+
+# GATK4 MUTECT2 paired (upstream BAM_VARIANT_CALLING_MUTECT2: --input
+# tumor --input normal -normal <normal sample name>; interval padding
+# skipped upstream without a target BED)
+[[rules]]
+name = "gatk_mutect2_paired"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.baf.tsv",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.stats",
+]
+description = "Somatic SNV/indel calling, tumor-normal pair (nf-core GATK4_MUTECT2; ext.args '--create-output-bam-index false --intervals-with-mate-pagination false --add-output-vcf-command-line false')"
+when = "config.call_mutect2 && wildcard.control != ''"
+log = "logs/gatk_mutect2_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" Mutect2 -R reference.fasta -I {input[0]} -I {input[1]} -normal {control} -O {experiment}_vs_{control}.mutect2.vcf.gz --f1r2-tar-gz {experiment}_vs_{control}.mutect2.baf.tar.gz --stats {experiment}_vs_{control}.mutect2.stats --tmp-dir .
+ls {experiment}_vs_{control}.mutect2.baf.tar.gz >/dev/null 2>&1 && mv {experiment}_vs_{control}.mutect2.baf.tar.gz {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/ || true
+mv {experiment}_vs_{control}.mutect2.vcf.gz {experiment}_vs_{control}.mutect2.vcf.gz.tbi {experiment}_vs_{control}.mutect2.stats {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# GATK4 MUTECT2 tumor-only (upstream runs the same module without -normal;
+# the orientation-bias model is skipped without a panel — documented
+# limitation, not a deviation: upstream tumor-only also lacks it)
+[[rules]]
+name = "gatk_mutect2_tumor_only"
+input = ["{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}"]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.stats",
+]
+description = "Somatic SNV/indel calling, tumor-only (nf-core GATK4_MUTECT2 without -normal)"
+when = "config.call_mutect2 && wildcard.control == ''"
+log = "logs/gatk_mutect2_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" Mutect2 -R reference.fasta -I {input[0]} -O {experiment}.mutect2.vcf.gz --stats {experiment}.mutect2.stats --tmp-dir .
+mv {experiment}.mutect2.vcf.gz {experiment}.mutect2.vcf.gz.tbi {experiment}.mutect2.stats {config.out_dir}/variant_calling/mutect2/{experiment}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# GetPileupSummaries + CalculateContamination (upstream
+# contamination_estimation; paired samples only — the outputs feed
+# FilterMutectCalls --contamination-table)
+[[rules]]
+name = "gatk_getpileupsummaries_paired"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}.pileups.table",
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{control}.pileups.table",
+]
+description = "Pileup summaries for contamination estimation, tumor + normal (nf-core GATK4_GETPILEUPSUMMARIES; small SAM only)"
+when = "config.call_mutect2 && config.contamination_estimation && wildcard.control != ''"
+shell = """
+mkdir -p intermediates/variant_calling/mutect2/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GetPileupSummaries -I {input[0]} -R reference.fasta -O {experiment}.pileups.table --tmp-dir .
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" GetPileupSummaries -I {input[1]} -R reference.fasta -O {control}.pileups.table --tmp-dir .
+mv {experiment}.pileups.table {control}.pileups.table intermediates/variant_calling/mutect2/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+[[rules]]
+name = "gatk_calculatecontamination_paired"
+input = [
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}.pileups.table",
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{control}.pileups.table",
+]
+output = [
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.contamination.table",
+  "intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.segmentation.table",
+]
+description = "Cross-sample contamination estimate from pileups (nf-core GATK4_CALCULATECONTAMINATION)"
+when = "config.call_mutect2 && config.contamination_estimation && wildcard.control != ''"
+depends_on = ["gatk_getpileupsummaries_paired"]
+shell = """
+mkdir -p intermediates/variant_calling/mutect2/{experiment}_vs_{control}
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" CalculateContamination -I {input[0]} -MATCHED-NORMAL {input[1]} -O {experiment}_vs_{control}.contamination.table --tumor-segmentation {experiment}_vs_{control}.segmentation.table
+mv {experiment}_vs_{control}.contamination.table {experiment}_vs_{control}.segmentation.table intermediates/variant_calling/mutect2/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# FilterMutectCalls (upstream FILTER_MUTECT_CALLS; --contamination-table
+# wired only when contamination_estimation produced one — the shell
+# precedence chain mirrors the repo's clip_tool pattern)
+[[rules]]
+name = "gatk_filtermutectcalls_paired"
+input = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.stats",
+]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.filtered.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.filtered.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.filtered.stats",
+]
+description = "Filter raw Mutect2 calls, tumor-normal pair (nf-core GATK4_FILTERMUTECTCALLS; contamination table consumed when contamination_estimation ran)"
+when = "config.call_mutect2 && wildcard.control != ''"
+depends_on = ["gatk_mutect2_paired"]
+log = "logs/gatk_filtermutectcalls_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+CONTAM="intermediates/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.contamination.table"
+if [ -f "$CONTAM" ]; then
+  gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" FilterMutectCalls -R reference.fasta -V {input[0]} --stats {input[2]} --contamination-table "$CONTAM" -O {experiment}_vs_{control}.mutect2.filtered.vcf.gz --tmp-dir .
+else
+  gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" FilterMutectCalls -R reference.fasta -V {input[0]} --stats {input[2]} -O {experiment}_vs_{control}.mutect2.filtered.vcf.gz --tmp-dir .
+fi
+mv {experiment}_vs_{control}.mutect2.filtered.vcf.gz {experiment}_vs_{control}.mutect2.filtered.vcf.gz.tbi {experiment}_vs_{control}.mutect2.filtered.stats {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# FilterMutectCalls tumor-only (same module without the contamination
+# table — tumor-only has no matched normal to estimate with)
+[[rules]]
+name = "gatk_filtermutectcalls_tumor_only"
+input = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.stats",
+]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.filtered.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.filtered.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.filtered.stats",
+]
+description = "Filter raw Mutect2 calls, tumor-only (nf-core GATK4_FILTERMUTECTCALLS)"
+when = "config.call_mutect2 && wildcard.control == ''"
+depends_on = ["gatk_mutect2_tumor_only"]
+log = "logs/gatk_filtermutectcalls_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" FilterMutectCalls -R reference.fasta -V {input[0]} --stats {input[2]} -O {experiment}.mutect2.filtered.vcf.gz --tmp-dir .
+mv {experiment}.mutect2.filtered.vcf.gz {experiment}.mutect2.filtered.vcf.gz.tbi {experiment}.mutect2.filtered.stats {config.out_dir}/variant_calling/mutect2/{experiment}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# STRELKA2 somatic (upstream BAM_VARIANT_CALLING_STRELKA; paired only —
+# configureStrelkaSomaticWorkflow.py requires a normal BAM, matching
+# upstream where tumor-only skips Strelka)
+[[rules]]
+name = "strelka_somatic"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.strelka.somatic.SNV.vcf.gz",
+  "{config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.strelka.somatic.SNV.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.strelka.somatic.INDEL.vcf.gz",
+  "{config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.strelka.somatic.INDEL.vcf.gz.tbi",
+]
+description = "Somatic SNV/indel calling with Strelka2 (nf-core STRELKA_SOMATIC; email-check disabled via sed)"
+when = "config.call_strelka_somatic && wildcard.control != ''"
+log = "logs/strelka_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+configureStrelkaSomaticWorkflow.py --normalBam {input[1]} --tumorBam {input[0]} --referenceFasta reference.fasta --runDir strelka_somatic
+sed -i s/"isEmail = isLocalSmtp()"/"isEmail = False"/g strelka_somatic/runWorkflow.py
+python strelka_somatic/runWorkflow.py -m local -j {effective_threads}
+mv strelka_somatic/results/variants/somatic.SNV.vcf.gz {experiment}_vs_{control}.strelka.somatic.SNV.vcf.gz
+mv strelka_somatic/results/variants/somatic.SNV.vcf.gz.tbi {experiment}_vs_{control}.strelka.somatic.SNV.vcf.gz.tbi
+mv strelka_somatic/results/variants/somatic.INDEL.vcf.gz {experiment}_vs_{control}.strelka.somatic.INDEL.vcf.gz
+mv strelka_somatic/results/variants/somatic.INDEL.vcf.gz.tbi {experiment}_vs_{control}.strelka.somatic.INDEL.vcf.gz.tbi
+mv {experiment}_vs_{control}.strelka.somatic.*.vcf.gz* {config.out_dir}/variant_calling/strelkasomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "24G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/strelka:2.9.10--h9ee0642_1"
+
+# Manta somatic SV (upstream BAM_VARIANT_CALLING_MANTA with a normal BAM →
+# the somatic workflow; paired only — tumor-only SV runs the germline
+# manta_germline rule per sample instead)
+[[rules]]
+name = "manta_somatic"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/mantasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.manta.somatic_sv.vcf.gz",
+  "{config.out_dir}/variant_calling/mantasomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.manta.somatic_sv.vcf.gz.tbi",
+]
+description = "Somatic SV calling with Manta (nf-core BAM_VARIANT_CALLING_MANTA somatic mode; only somatic SV is published — candidates stay in the workdir)"
+when = "config.call_manta_somatic && wildcard.control != ''"
+log = "logs/manta_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mantasomatic/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+configManta.py --normalBam {input[1]} --tumorBam {input[0]} --referenceFasta reference.fasta --runDir manta_somatic
+python manta_somatic/runWorkflow.py -m local -j {effective_threads}
+mv manta_somatic/results/variants/somaticSV.vcf.gz {experiment}_vs_{control}.manta.somatic_sv.vcf.gz
+mv manta_somatic/results/variants/somaticSV.vcf.gz.tbi {experiment}_vs_{control}.manta.somatic_sv.vcf.gz.tbi
+mv {experiment}_vs_{control}.manta.somatic_sv.vcf.gz {experiment}_vs_{control}.manta.somatic_sv.vcf.gz.tbi {config.out_dir}/variant_calling/mantasomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 8
+memory = "16G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/manta:1.6.0--hdfd78af_2"
 
 # DeepVariant (upstream BAM_VARIANT_CALLING_DEEPVARIANT; WGS model)
 [[rules]]
