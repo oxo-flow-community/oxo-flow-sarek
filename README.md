@@ -75,9 +75,11 @@ cd oxo-flow-sarek
   pairs per sample (fastp split cap, see Fidelity).
 - **Compute** — up to 24 CPUs / 36 GB per rule (BWA-MEM: 24 threads / 30G;
   VEP: 6 threads / 36G).
-- **Tools** — Docker containers with pinned images, declared per rule in
-  `main.oxoflow` (`[rules.environment]`); Docker is required at runtime (no
-  conda environments are used).
+- **Tools** — conda environments declared per rule in `main.oxoflow`
+  (`[rules.environment] conda = "envs/*.yaml"`; 8 environment files under
+  `envs/`), with pinned Singularity `docker://` image URIs as the container
+  alternative; both execution modes are supported (no Docker daemon required
+  for the conda path).
 - **Disk** — `results/` grows with per-sample CRAMs, VCFs and reports; the
   GRCh38 reference bundle and VEP cache require substantial disk space of
   their own.
@@ -157,7 +159,7 @@ every ported optional branch (gated by config flags — all default-off).
 | MULTIQC | `multiqc` | multiqc 1.35 | fan-in over all report producers (depends_on covers the gated branches — skipped rules auto-satisfy); scans the results dir with the upstream `assets/multiqc_config.yml` |
 | PREPARE_INTERVALS (BUILD_INTERVALS, CREATE_INTERVALS_BED, TABIX_BGZIPTABIX) + per-interval scatter/gather of BQSR / ApplyBQSR / HaplotypeCaller / joint GenotypeGVCFs (GATK4_GATHERBQSRREPORTS, CRAM/BAM_MERGE_INDEX_SAMTOOLS, GATK4_MERGEVCFS) | `create_intervals_bed`, `tabix_interval`, `gatk_baserecalibrator_scatter`, `gatk_gatherbqsrreports`, `gatk_applybqsr_scatter`, `merge_index_samtools`, `gatk_haplotypecaller_scatter`, `gatk_mergevcfs_scatter`, `gatk_haplotypecaller_gvcf_scatter`, `gatk_genomicsdbimport_scatter`, `gatk_genotypegvcfs_scatter`, `bcftools_sort_joint_scatter`, `gatk_mergevcfs_joint_scatter` | gawk 5.3.0, samtools 1.24, gatk4 4.5.0.0 | `scatter_gatk = true` (default off). Deviation: the engine's scatter fan-out takes a **static** value list, so intervals are one per chromosome (`config.chromosomes` — keep it in sync with the fasta `.fai`) instead of upstream's duration-binned windows (`nucleotides_per_second`); every downstream gather is exact and writes the same paths as the single-job branch, so results are identical — the branch adds per-contig parallelism, it does not change outputs. Live-verified on tx-ubuntu 2026-08-27 (`scatter_gatk=true`, 13 rules + gathers, 0 failed; surfaced + fixed the CRAM 3.0 merge issue — see Test) |
 | fastp split parts (multi-part BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS) | `fastp_split`, `bwa_mem_split`, `bwa_mem2_split`, `bam_merge_index_samtools` | fastp 1.1.0, bwa 0.7.19 / bwa-mem2, samtools 1.24 | `split_parts = true` (default off) — fastp's `--split_by_lines` parts are enumerated at runtime via the engine's `output_pattern` primitive (data-dependent part count, exactly like upstream's channel scan) and the per-part BWA_MEM/BWA_MEM2 + BAM_MERGE_INDEX_SAMTOOLS fan-out is reproduced: every part is aligned (`{sample}.NNNN.bam`, upstream prefix `{meta.id}.{token}`) and merged + indexed into `{sample}.sorted.bam` (upstream MERGE_BAM prefix `{meta.id}.sorted`) before MarkDuplicates — no input cap. Requires `mapped_bam = "sorted"`; not supported with `umi_read_structure`. See the deviation note below for the merge gating design. Requires the engine's output_pattern primitive (Traitome/oxo-flow#235) — unreleased as of v0.16.0, ships in the next engine release |
-| Mutect2 (paired + tumor-only, FilterMutectCalls, optional GetPileupSummaries → CalculateContamination) | `call_mutect2` (+ `contamination_estimation`) | off | pair-fanned via `config/somatic_pairs.tsv` (`pair_id, experiment=tumor, control=normal`; empty control = tumor-only). PoN/gnomAD panels not wired (resource step) |
+| Mutect2 (paired + tumor-only, FilterMutectCalls, optional GetPileupSummaries → CalculateContamination) | `call_mutect2` (+ `contamination_estimation`) | off | pair-fanned via `config/somatic_pairs.tsv` (`pair_id, experiment=tumor, control=normal`; empty control = tumor-only). Deviation: Mutect2's optional `--germline-resource` / `--panel-of-normals` inputs are not wired — the port has no config keys for them and contamination is estimated from the pair's pileups instead; to use a PoN, filter the Mutect2 VCF downstream (upstream passes them only when resource files are provided) |
 | Strelka2 somatic | `call_strelka_somatic` | off | paired only (upstream `configureStrelkaSomaticWorkflow.py` requires a normal BAM — tumor-only pairs skip it) |
 | Manta somatic SV | `call_manta_somatic` | off | paired only (tumor-only SV runs the per-sample germline `manta_germline`); publishes somaticSV.vcf.gz |
 | CNVkit, ASCAT, MSIsensor2/pro, SomaticSniper, VarDict, Control-FREEC, LoFreq, Varlociraptor | — not ported | — | tumor/normal pairs required; further callers follow the same `[[pairs]]` pattern once their env fixtures exist |
@@ -209,6 +211,10 @@ Deviations (all documented, nothing silently dropped):
 - **single-lane model**: `meta.id` = `{sample}` from BWA-MEM onward
   (upstream: `{sample}-{lane}`); preprocessing stage files keep the upstream
   `{sample}-{lane}` prefix. Read-group IDs are `{sample}.{lane}` as upstream.
+- **BWA-MEM alignment args**: upstream `aligner.config` appends `-B 3` for
+  tumor samples (`meta.status == 1`, longer insert-size penalty for
+  tumor/normal pairs); the port's `bwa_mem` rules always run
+  `-K 100000000 -Y` without `-B 3`, for all samples.
 - **Docker staging**: only the rule workdir is mounted, so reference files are
   copied into the workdir under fixed local names (`reference.fasta`,
   `reference.fasta.fai`, `reference.dict`) — same effect as Nextflow's
