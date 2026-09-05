@@ -1564,7 +1564,7 @@ output = [
 ]
 description = "Filter raw Mutect2 calls, tumor-normal pair (nf-core GATK4_FILTERMUTECTCALLS; contamination table consumed when contamination_estimation ran)"
 when = "config.call_mutect2 && wildcard.control != ''"
-depends_on = ["gatk_mutect2_paired"]
+depends_on = ["gatk_mutect2_paired", "gatk_calculatecontamination_paired"]
 log = "logs/gatk_filtermutectcalls_{experiment}_vs_{control}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}
@@ -1871,7 +1871,7 @@ singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
 
 # ---------------------------------------------------------------------------
 # ENSEMBLVEP_VEP — nf-core/ensemblvep/vep module
-# (GRCh38: --assembly GRCh38 --species homo_sapiens --cache --cache_version 116
+# (GRCh38: --assembly GRCh38 --species homo_sapiens --cache --cache_version 112
 # --dir_cache /.vep; ext.args '--stats_file <id>_VEP.ann.summary.html --vcf';
 # ext.prefix = vcf basename minus '.vcf' + '_VEP.ann'; tabix index after)
 # ---------------------------------------------------------------------------
