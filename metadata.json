@@ -150,11 +150,11 @@
     "MUSE (upstream subworkflow bam_variant_calling_somatic_muse: MUSE_CALL + MUSE_SUMP) — somatic SNV caller not ported; needs its own env + tumor/normal fixtures",
     "MSIsensorpro (modules/nf-core/msisensorpro: scan + msisomatic) — MSI caller not ported; needs own env + model data + fixtures",
     "CNVkit / ASCAT / Control-FREEC / MSIsensor2 / LoFreq / Varlociraptor — the remaining somatic callers that exist in upstream 3.10.0; Mutect2 / Strelka2-somatic / Manta-somatic are ported (call_mutect2 / call_strelka_somatic / call_manta_somatic, pair-fanned via config/somatic_pairs.tsv); the rest need their own envs/fixtures. (SomaticSniper and VarDict are NOT upstream 3.10.0 features — absent from the nextflow_schema.json tools enum and from all wired subworkflows — so they are not listed)",
-    "TIDDIT somatic mode + SVDB merge (subworkflow bam_variant_calling_somatic_tiddit; modules/nf-core/svdb/merge) and FreeBayes / mpileup in somatic & tumor-only mode — not ported; port call_tiddit is germline single-sample (--skip_assembly), call_freebayes/call_mpileup are germline, and the tumor-only path is Mutect2 only",
+    "FreeBayes / mpileup in somatic & tumor-only mode — not ported; port call_freebayes/call_mpileup are germline, and the tumor-only path is Mutect2 only",
     "Annotation beyond VEP: snpEff / SnpSift (modules/nf-core/snpeff + snpsift, upstream prepare_snpsift_databases / vcf_annotate_all) and the upstream merge / bcftools annotate (bcfann) options — not ported; the port annotates every caller VCF with VEP only",
     "Non-default I/O and prep paths not ported: gatk4spark Spark BQSR/ApplyBQSR/MarkDuplicates (modules/nf-core/gatk4spark; subworkflows bam_applybqsr_spark / bam_baserecalibrator_spark / bam_markduplicates_spark), bbsplit/bbmap genomic-contaminant split (fastq_preprocess_gatk), SPRING compressed FASTQ input (samplesheet_to_channel spring_1/spring_2; nf-core/spring), and untar-based reference download in prepare_genome (UNTAR_BBSPLIT_INDEX / UNTAR_CHR_DIR / UNTAR_MSISENSOR2_MODELS) — the port runs non-Spark GATK4, accepts raw FASTQ.gz, and requires user-provided reference files"
   ],
-  "rule_count": 117,
+  "rule_count": 119,
   "tools": [
     "fastqc",
     "fastp",
@@ -197,5 +197,6 @@
   },
   "repo_url": "https://github.com/oxo-flow-community/oxo-flow-sarek",
   "license": "Apache-2.0",
-  "upstream_license": "MIT"
+  "upstream_license": "MIT",
+  "updated": "2026-09-07"
 }
