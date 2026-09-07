@@ -1358,10 +1358,13 @@ conda = "envs/samtools.yaml"
 
 # TIDDIT somatic (upstream BAM_VARIANT_CALLING_SOMATIC_TIDDIT +
 # SVDB_MERGE): TIDDIT_SV per pair member (normal with
-# ext.prefix '{id}.tiddit.normal', tumor with '{id}.tiddit.tumor',
-# bwa index present upstream → no --skip_assembly on the somatic path),
-# then svdb --merge over both VCFs (args2 '--output-type z',
-# ext.prefix '{id}.tiddit_sv_merge') → bgzip'd merged VCF.
+# ext.prefix '{id}.tiddit.normal', tumor with '{id}.tiddit.tumor' — and
+# upstream meta.id on the pair path is "{tumor}_vs_{normal}" (sarek.nf
+# pair-meta construction), so the file prefixes here are
+# "{experiment}_vs_{control}.tiddit.[normal|tumor]"; bwa index present
+# upstream → no --skip_assembly on the somatic path), then svdb --merge
+# over both VCFs (args2 '--output-type z', ext.prefix
+# '{id}.tiddit_sv_merge') → bgzip'd merged VCF.
 [[rules]]
 name = "tiddit_sv_somatic"
 input = [
@@ -1369,10 +1372,10 @@ input = [
   "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
 ]
 output = [
-  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.normal.vcf",
-  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.normal.ploidies.tab",
-  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.tumor.vcf",
-  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.tumor.ploidies.tab",
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit.normal.vcf",
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit.normal.ploidies.tab",
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit.tumor.vcf",
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit.tumor.ploidies.tab",
 ]
 description = "Somatic SV calling with TIDDIT, tumor-normal pair (nf-core TIDDIT_SV as TIDDIT_NORMAL+TIDDIT_TUMOR; the pair path passes a bwa index so --skip_assembly is not set, unlike the germline call)"
 when = "config.call_tiddit && wildcard.control != ''"
@@ -1381,9 +1384,9 @@ shell = """
 mkdir -p {config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
-tiddit --sv --threads {effective_threads} --bam {input[1]} --ref reference.fasta -o {experiment}.tiddit.normal
-tiddit --sv --threads {effective_threads} --bam {input[0]} --ref reference.fasta -o {experiment}.tiddit.tumor
-mv {experiment}.tiddit.normal.vcf {experiment}.tiddit.normal.ploidies.tab {experiment}.tiddit.tumor.vcf {experiment}.tiddit.tumor.ploidies.tab {config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/
+tiddit --sv --threads {effective_threads} --bam {input[1]} --ref reference.fasta -o {experiment}_vs_{control}.tiddit.normal
+tiddit --sv --threads {effective_threads} --bam {input[0]} --ref reference.fasta -o {experiment}_vs_{control}.tiddit.tumor
+mv {experiment}_vs_{control}.tiddit.normal.vcf {experiment}_vs_{control}.tiddit.normal.ploidies.tab {experiment}_vs_{control}.tiddit.tumor.vcf {experiment}_vs_{control}.tiddit.tumor.ploidies.tab {config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/
 """
 
 [rules.resources]
