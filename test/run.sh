@@ -178,4 +178,28 @@ git checkout -q config/somatic_pairs.tsv
 trap - EXIT
 echo "  cnvkit_batch + cnvkit_genemetrics + cnvkit_export on with a filled pair sheet; off by default"
 
+echo "==> lofreq branch: dry-run with call_lofreq (cohort fan-out)"
+# Upstream nf-core/sarek 3.10.0 wires lofreq only on the tumor-only path
+# (BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ: LOFREQ_CALLPARALLEL per sample,
+# ext.args "--call-indels", prefix ${meta.id}.lofreq); there is no paired
+# lofreq leg. The port fans lofreq_call over every cohort sample with a
+# samtools CRAM->BAM pre-conversion. This block flips call_lofreq and asserts
+# the cohort instances schedule (and stay off by default).
+sed 's/^call_lofreq = false$/call_lofreq = true/' main.oxoflow > .lof-test-tmp.oxoflow
+trap 'rm -f .lof-test-tmp.oxoflow' EXIT
+"$OXO" dry-run .lof-test-tmp.oxoflow > /tmp/oxo-dryrun-lof-$$.txt 2>&1
+for r in lofreq_call_cohort_test lofreq_call_cohort_test2 \
+         bcftools_stats_lofreq_cohort_test \
+         vcftools_tstv_count_lofreq_cohort_test; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-lof-$$.txt \
+        || { echo "lofreq branch: ${r} not scheduled"; exit 1; }
+done
+# Default config must have no lofreq instance.
+if grep -qE "^  [0-9]+\. lofreq_[a-z_]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "lofreq branch: rule scheduled with default config"; exit 1
+fi
+rm -f .lof-test-tmp.oxoflow
+trap - EXIT
+echo "  lofreq_call on (cohort fan-out + QC family); off by default"
+
 echo "PASS"

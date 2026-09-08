@@ -157,6 +157,12 @@ msisensorpro_scan = "/data/references/GRCh38/Annotation/MSIsensorPro/Homo_sapien
 # CNVKIT_CALL -> CNVKIT_EXPORT + CNVKIT_GENEMETRICS). Uses the wes flag for
 # the hybrid/wgs batch method switch.
 call_cnvkit = false
+# LoFreq SNV/indel (upstream BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ:
+# LOFREQ_CALLPARALLEL per sample with --call-indels). In upstream 3.10.0 the
+# lofreq leg only exists on the tumor-only path (bam_variant_calling_tumor_
+# only_all — single-sample call-parallel over each samplesheet entry, no
+# paired mode); the port runs it over every cohort sample.
+call_lofreq = false
 # CalculateContamination: GetPileupSummaries + CalculateContamination on the
 # pair, feeding FilterMutectCalls --contamination-table (upstream
 # contamination_estimation; requires a paired sample).
@@ -1892,6 +1898,51 @@ memory = "72G"
 [rules.environment]
 conda = "envs/muse.yaml"
 
+# LoFreq SNV/indel calling (upstream BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ —
+# in upstream 3.10.0 the lofreq leg exists only on the tumor-only path:
+# LOFREQ_CALLPARALLEL per sample, ext.args "--call-indels", prefix
+# "${meta.id}.lofreq", published to variant_calling/lofreq/{meta.id}/; there
+# is no paired lofreq leg in bam_variant_calling_somatic_all). LOFREQ_
+# CALLPARALLEL is process_high (12 cpus / 72GB). The module converts CRAM
+# inputs to BAM with samtools view first (lofreq cannot read CRAM natively)
+# and deletes the converted BAM afterwards; interval scatter/MergeVcfs is not
+# ported (the port runs without interval scatter, like the germline chain).
+# The port fans out over every cohort sample — pair members are already
+# covered (upstream runs the same single-sample call on each pair member via
+# the germline path), and tumor-only samples are in the cohort too.
+[[rules]]
+name = "lofreq_call"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.fasta}",
+  "{config.fasta_fai}",
+]
+output = [
+  "{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz",
+  "{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz.tbi",
+]
+description = "LoFreq variant calling with call-parallel (nf-core LOFREQ_CALLPARALLEL; ext.args --call-indels, CRAM converted to BAM first)"
+when = "config.call_lofreq"
+log = "logs/lofreq_call_{sample}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/lofreq/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+samtools view -T reference.fasta --fai-reference reference.fasta.fai {input[0]} -@ {effective_threads} -o converted.bam
+samtools index converted.bam
+lofreq call-parallel --pp-threads {effective_threads} --call-indels -f reference.fasta -o {sample}.lofreq.vcf.gz converted.bam
+rm converted.bam converted.bam.bai
+tabix -p vcf {sample}.lofreq.vcf.gz
+mv {sample}.lofreq.vcf.gz {sample}.lofreq.vcf.gz.tbi {config.out_dir}/variant_calling/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "72G"
+
+[rules.environment]
+conda = "envs/lofreq.yaml"
+
 # MSIsensor-pro MSI scoring (upstream prepare_genome MSISENSORPRO_SCAN +
 # bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC, nf-core/sarek
 # 3.10.0). MSISENSORPRO_SCAN runs `msisensor-pro scan` on the fasta once per
@@ -2960,6 +3011,112 @@ memory = "36G"
 [rules.environment]
 conda = "envs/vep.yaml"
 
+# LoFreq QC + VEP fan-out: upstream 3.10.0 lists lofreq among the small
+# variantcallers eligible for VCF_QC_BCFTOOLS_VCFTOOLS and annotation (the
+# cohort fan-out is a single-sample call, so the family mirrors the germline
+# callers; there is no lofreq filtering step in the port, so the VCF is
+# consumed as published).
+[[rules]]
+name = "bcftools_stats_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/lofreq/{sample}/{sample}.lofreq.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the lofreq VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_lofreq && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/lofreq/{sample}
+bcftools stats {input[0]} > {sample}.lofreq.bcftools_stats.txt
+mv {sample}.lofreq.bcftools_stats.txt {config.out_dir}/reports/bcftools/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/lofreq/{sample}/{sample}.lofreq.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the lofreq VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_lofreq && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/lofreq/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {sample}.lofreq
+mv {sample}.lofreq.TsTv.count {config.out_dir}/reports/vcftools/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/lofreq/{sample}/{sample}.lofreq.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the lofreq VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_lofreq && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/lofreq/{sample}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {sample}.lofreq
+mv {sample}.lofreq.TsTv.qual {config.out_dir}/reports/vcftools/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/lofreq/{sample}/{sample}.lofreq.FILTER.summary"]
+description = "VCF QC: FILTER summary on the lofreq VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_lofreq && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/lofreq/{sample}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {sample}.lofreq
+mv {sample}.lofreq.FILTER.summary {config.out_dir}/reports/vcftools/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/lofreq/{sample}/{sample}.lofreq_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/lofreq/{sample}/{sample}.lofreq_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/lofreq/{sample}/{sample}.lofreq_VEP.ann.summary.html",
+]
+description = "VEP annotation of lofreq variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_lofreq && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/lofreq/{sample} {config.out_dir}/reports/EnsemblVEP/lofreq/{sample}
+vep -i {input[0]} -o {sample}.lofreq_VEP.ann.vcf.gz --stats_file {sample}.lofreq_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {sample}.lofreq_VEP.ann.vcf.gz
+mv {sample}.lofreq_VEP.ann.vcf.gz {sample}.lofreq_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/lofreq/{sample}/
+mv {sample}.lofreq_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
 [[rules]]
 name = "bcftools_stats_manta"
 input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
@@ -3801,6 +3958,36 @@ memory = "36G"
 [rules.environment]
 conda = "envs/snpeff.yaml"
 
+# LoFreq snpEff fan-out: mirrors the germline snpeff_snpeff family (lofreq is
+# a small-variant caller, annotated alongside the others upstream).
+[[rules]]
+name = "snpeff_snpeff_lofreq"
+input = ["{config.out_dir}/variant_calling/lofreq/{sample}/{sample}.lofreq.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/lofreq/{sample}/{sample}.lofreq_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/lofreq/{sample}/{sample}.lofreq_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/lofreq/{sample}/{sample}.lofreq_snpeff.ann.csv",
+]
+description = "snpEff annotation of lofreq variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_lofreq && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_lofreq_{sample}.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/lofreq/{sample} {config.out_dir}/reports/SnpEff/lofreq/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.lofreq_snpeff.ann {input[0]} > {sample}.lofreq_snpeff.ann.vcf
+bgzip -c {sample}.lofreq_snpeff.ann.vcf > {sample}.lofreq_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.lofreq_snpeff.ann.vcf.gz
+mv {sample}.lofreq_snpeff.ann.vcf.gz {sample}.lofreq_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/lofreq/{sample}/
+mv {sample}.lofreq_snpeff.ann.csv {config.out_dir}/reports/SnpEff/lofreq/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
 # ---------------------------------------------------------------------------
 # Per-chromosome scatter/gather branch (optional, gated by scatter_gatk).
 # Upstream PREPARE_INTERVALS (BUILD_INTERVALS gawk over the .fai ->
@@ -4222,6 +4409,7 @@ depends_on = [
   "snpeff_snpeff_tiddit",
   "snpeff_snpeff_joint",
   "snpeff_snpeff_freebayes_somatic",
+  "snpeff_snpeff_lofreq",
   "fgbio_groupreadsbyumi",
   "bcftools_mpileup_ngscheckmate",
   "ngscheckmate_ncm",
@@ -4261,6 +4449,11 @@ depends_on = [
   "vcftools_tstv_qual_freebayes_somatic",
   "vcftools_filter_summary_freebayes_somatic",
   "ensemblvep_vep_freebayes_somatic",
+  "bcftools_stats_lofreq",
+  "vcftools_tstv_count_lofreq",
+  "vcftools_tstv_qual_lofreq",
+  "vcftools_filter_summary_lofreq",
+  "ensemblvep_vep_lofreq",
 ]
 output = ["{config.out_dir}/multiqc_report.html"]
 description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"
