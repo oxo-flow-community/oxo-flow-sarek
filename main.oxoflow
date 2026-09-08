@@ -1304,6 +1304,73 @@ memory = "8G"
 [rules.environment]
 conda = "envs/bcftools.yaml"
 
+# Somatic bcftools mpileup + call. Upstream of_somatic_all.nf only runs
+# BAM_VARIANT_CALLING_MPILEUP inside the controlfreec branch in paired mode —
+# the mpileup TEXT feeds BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC and no
+# somatic mpileup VCF is published on the paired path. The port has no
+# controlfreec leg yet, so the paired instance exists to keep the rule set
+# shape-faithful but is wired for completeness; the tumor-only instance
+# (control empty) is the real upstream behavior: OF_TUMOR_ONLY_ALL publishes
+# the mpileup VCF when tools contains mpileup, mixed into vcf_all.
+[[rules]]
+name = "bcftools_mpileup_call_somatic"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/bcftoolssomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.bcftools.vcf.gz",
+  "{config.out_dir}/variant_calling/bcftoolssomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.bcftools.vcf.gz.tbi",
+]
+description = "Somatic variant calling with bcftools mpileup + call on the tumor BAM (nf-core BCFTOOLS_MPILEUP; upstream paired path feeds Control-FREEC only, tumor-only path publishes the VCF)"
+when = "config.call_mpileup && wildcard.control != ''"
+log = "logs/bcftools_mpileup_call_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/bcftoolssomatic/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+echo "{experiment}" > sample_name.list
+bcftools mpileup --fasta-ref reference.fasta {input[0]} | bcftools call --output-type v --multiallelic-caller | bcftools reheader --samples sample_name.list | bcftools view --output-file {experiment}_vs_{control}.bcftools.vcf.gz --output-type z -i 'count(GT=="RR")==0'
+tabix -p vcf -f {experiment}_vs_{control}.bcftools.vcf.gz
+bcftools stats {experiment}_vs_{control}.bcftools.vcf.gz > {experiment}_vs_{control}.bcftools.bcftools_stats.txt
+mv {experiment}_vs_{control}.bcftools.vcf.gz {experiment}_vs_{control}.bcftools.vcf.gz.tbi {config.out_dir}/variant_calling/bcftoolssomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "bcftools_mpileup_call_somatic_tumor_only"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/bcftoolssomatic/{experiment}/{experiment}.bcftools.vcf.gz",
+  "{config.out_dir}/variant_calling/bcftoolssomatic/{experiment}/{experiment}.bcftools.vcf.gz.tbi",
+]
+description = "Tumor-only variant calling with bcftools mpileup + call (nf-core BCFTOOLS_MPILEUP via OF_TUMOR_ONLY_ALL; VCF published and mixed into vcf_all)"
+when = "config.call_mpileup && wildcard.control == ''"
+log = "logs/bcftools_mpileup_call_somatic_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/bcftoolssomatic/{experiment}
+cp -L {config.fasta} ./reference.fasta
+echo "{experiment}" > sample_name.list
+bcftools mpileup --fasta-ref reference.fasta {input[0]} | bcftools call --output-type v --multiallelic-caller | bcftools reheader --samples sample_name.list | bcftools view --output-file {experiment}.bcftools.vcf.gz --output-type z -i 'count(GT=="RR")==0'
+tabix -p vcf -f {experiment}.bcftools.vcf.gz
+bcftools stats {experiment}.bcftools.vcf.gz > {experiment}.bcftools.bcftools_stats.txt
+mv {experiment}.bcftools.vcf.gz {experiment}.bcftools.vcf.gz.tbi {config.out_dir}/variant_calling/bcftoolssomatic/{experiment}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "8G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
 # TIDDIT structural variants (upstream BAM_VARIANT_CALLING_SINGLE_TIDDIT +
 # TABIX_BGZIP_TIDDIT_SV; germline runs with --skip_assembly — upstream
 # passes an empty bwa index channel)
@@ -1763,6 +1830,144 @@ memory = "16G"
 [rules.environment]
 singularity = "docker://quay.io/biocontainers/manta:1.6.0--hdfd78af_2"
 
+# FreeBayes somatic, tumor-normal pair (upstream BAM_VARIANT_CALLING_FREEBAYES
+# on the somatic path: the pair-shaped cram channel passes BOTH recalibrated
+# BAMs to ONE freebayes invocation — module builds input = "${input_1}
+# ${input_2}", normal first, tumor second; ext.args
+# '--min-alternate-fraction 0.1 --min-mapping-quality 1') then
+# BCFTOOLS_SORT -> TABIX -> VCFLIB_VCF_FILTER (QUAL > freebayes_filter) ->
+# TABIX. Tumor-only pairs (control empty): upstream runs the same module on
+# the single cram with identical args — that is exactly the port's germline
+# freebayes chain, which already runs for every cohort sample (see README).
+[[rules]]
+name = "freebayes_somatic"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.vcf.gz"]
+description = "Somatic joint calling with FreeBayes, tumor-normal pair (nf-core FREEBAYES with both BAMs on one command line, normal first; bgzip'ed in-module)"
+when = "config.call_freebayes && wildcard.control != ''"
+log = "logs/freebayes_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+freebayes -f reference.fasta --min-alternate-fraction 0.1 --min-mapping-quality 1 {input[1]} {input[0]} > {experiment}_vs_{control}.vcf
+bgzip {experiment}_vs_{control}.vcf
+mv {experiment}_vs_{control}.vcf.gz {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "8G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/freebayes:1.3.10--hbefcdb2_0"
+
+[[rules]]
+name = "freebayes_somatic_tumor_only"
+input = ["{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}"]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}/{experiment}.vcf.gz"]
+description = "Tumor-only FreeBayes variant calling (nf-core FREEBAYES on the single cram via OF_TUMOR_ONLY_ALL; same args as the germline chain, bgzip'ed in-module)"
+when = "config.call_freebayes && wildcard.control == ''"
+log = "logs/freebayes_somatic_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+freebayes -f reference.fasta --min-alternate-fraction 0.1 --min-mapping-quality 1 {input[0]} > {experiment}.vcf
+bgzip {experiment}.vcf
+mv {experiment}.vcf.gz {config.out_dir}/variant_calling/freebayessomatic/{experiment}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "8G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/freebayes:1.3.10--hbefcdb2_0"
+
+[[rules]]
+name = "bcftools_sort_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.vcf.gz"]
+description = "Sort the somatic FreeBayes VCF with bcftools (nf-core BCFTOOLS_SORT, ext.prefix '{meta.id}.freebayes')"
+when = "config.call_freebayes && wildcard.control != ''"
+log = "logs/bcftools_sort_freebayes_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
+bcftools sort --output {experiment}_vs_{control}.freebayes.vcf.gz --temp-dir . --output-type z {input[0]}
+mv {experiment}_vs_{control}.freebayes.vcf.gz {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "tabix_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.vcf.gz.tbi"]
+description = "Index the sorted somatic FreeBayes VCF (nf-core TABIX_VC_FREEBAYES)"
+when = "config.call_freebayes && wildcard.control != ''"
+log = "logs/tabix_freebayes_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
+tabix -p vcf -f {experiment}_vs_{control}.freebayes.vcf.gz
+mv {experiment}_vs_{control}.freebayes.vcf.gz.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
+[[rules]]
+name = "vcffilter_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+description = "Filter the somatic FreeBayes VCF by QUAL (nf-core VCFLIB_VCF_FILTER_FREEBAYES, '--info-filter QUAL > freebayes_filter'; bgzip in-module)"
+when = "config.call_freebayes && wildcard.control != ''"
+log = "logs/vcffilter_freebayes_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
+vcffilter --info-filter 'QUAL > {config.freebayes_filter}' {input[0]} | bgzip -c > {experiment}_vs_{control}.freebayes.filtered.vcf.gz
+mv {experiment}_vs_{control}.freebayes.filtered.vcf.gz {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+singularity = "docker://community.wave.seqera.io/library/vcflib:1.0.14--cc8ffb2c1a080797"
+
+[[rules]]
+name = "tabix_freebayes_somatic_filt"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz.tbi"]
+description = "Index the filtered somatic FreeBayes VCF (nf-core TABIX_FREEBAYES_FILT)"
+when = "config.call_freebayes && wildcard.control != ''"
+log = "logs/tabix_freebayes_somatic_filt_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
+tabix -p vcf -f {experiment}_vs_{control}.freebayes.filtered.vcf.gz
+mv {experiment}_vs_{control}.freebayes.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/samtools.yaml"
+
 # DeepVariant (upstream BAM_VARIANT_CALLING_DEEPVARIANT; WGS model)
 [[rules]]
 name = "deepvariant"
@@ -2070,6 +2275,112 @@ vep -i {input[0]} -o {sample}.freebayes.filtered_VEP.ann.vcf.gz --stats_file {sa
 tabix {sample}.freebayes.filtered_VEP.ann.vcf.gz
 mv {sample}.freebayes.filtered_VEP.ann.vcf.gz {sample}.freebayes.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/freebayes/{sample}/
 mv {sample}.freebayes.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/vep.yaml"
+
+# Somatic FreeBayes QC + VEP fan-out: mirrors the germline freebayes family
+# exactly, but consumes the pair-fanned freebayessomatic VCFs. Upstream, the
+# somatic vcf_all feeds the same VCF_QC_BCFTOOLS_VCFTOOLS / ANNOTATE steps as
+# germline (sarek.nf mixes SOMATIC_ALL.out.vcf_all into the QC channel), so
+# one rule per caller is the faithful port.
+[[rules]]
+name = "bcftools_stats_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/bcftools/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.bcftools_stats.txt"]
+description = "VCF QC stats with bcftools on the somatic FreeBayes VCF (nf-core BCFTOOLS_STATS)"
+when = "config.call_freebayes && wildcard.control != '' && !config.skip_bcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/bcftools/freebayessomatic/{experiment}_vs_{control}
+bcftools stats {input[0]} > {experiment}_vs_{control}.freebayes.filtered.bcftools_stats.txt
+mv {experiment}_vs_{control}.freebayes.filtered.bcftools_stats.txt {config.out_dir}/reports/bcftools/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+conda = "envs/bcftools.yaml"
+
+[[rules]]
+name = "vcftools_tstv_count_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.TsTv.count"]
+description = "VCF QC: transition/transversion by count on the somatic FreeBayes VCF (nf-core VCFTOOLS_TSTV_COUNT)"
+when = "config.call_freebayes && wildcard.control != '' && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}
+vcftools --gzvcf {input[0]} --TsTv-by-count --out {experiment}_vs_{control}.freebayes.filtered
+mv {experiment}_vs_{control}.freebayes.filtered.TsTv.count {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_tstv_qual_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.TsTv.qual"]
+description = "VCF QC: transition/transversion by quality on the somatic FreeBayes VCF (nf-core VCFTOOLS_TSTV_QUAL)"
+when = "config.call_freebayes && wildcard.control != '' && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}
+vcftools --gzvcf {input[0]} --TsTv-by-qual --out {experiment}_vs_{control}.freebayes.filtered
+mv {experiment}_vs_{control}.freebayes.filtered.TsTv.qual {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "vcftools_filter_summary_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = ["{config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.FILTER.summary"]
+description = "VCF QC: FILTER summary on the somatic FreeBayes VCF (nf-core VCFTOOLS_SUMMARY)"
+when = "config.call_freebayes && wildcard.control != '' && !config.skip_vcftools"
+shell = """
+mkdir -p {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}
+vcftools --gzvcf {input[0]} --FILTER-summary --out {experiment}_vs_{control}.freebayes.filtered
+mv {experiment}_vs_{control}.freebayes.filtered.FILTER.summary {config.out_dir}/reports/vcftools/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+singularity = "docker://quay.io/biocontainers/vcftools:0.1.17--pl5321h077b44d_0"
+
+[[rules]]
+name = "ensemblvep_vep_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz",
+  "{config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/EnsemblVEP/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_VEP.ann.summary.html",
+]
+description = "VEP annotation of somatic FreeBayes variants (nf-core ENSEMBLVEP_VEP; requires VEP cache at vep_dir_cache — gated on vep_cache_ready)"
+when = "config.call_freebayes && wildcard.control != '' && config.annotate_vep && config.vep_cache_ready"
+shell = """
+mkdir -p {config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control} {config.out_dir}/reports/EnsemblVEP/freebayessomatic/{experiment}_vs_{control}
+vep -i {input[0]} -o {experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz --stats_file {experiment}_vs_{control}.freebayes.filtered_VEP.ann.summary.html --vcf --compress_output bgzip --assembly {config.vep_genome} --species {config.vep_species} --cache --cache_version {config.vep_cache_version} --dir_cache {config.vep_dir_cache} --fork 6
+tabix {experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz
+mv {experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz {experiment}_vs_{control}.freebayes.filtered_VEP.ann.vcf.gz.tbi {config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/
+mv {experiment}_vs_{control}.freebayes.filtered_VEP.ann.summary.html {config.out_dir}/reports/EnsemblVEP/freebayessomatic/{experiment}_vs_{control}/
 """
 
 [rules.resources]
@@ -3404,6 +3715,11 @@ depends_on = [
   "vcftools_tstv_qual_tiddit",
   "vcftools_filter_summary_tiddit",
   "ensemblvep_vep_tiddit",
+  "bcftools_stats_freebayes_somatic",
+  "vcftools_tstv_count_freebayes_somatic",
+  "vcftools_tstv_qual_freebayes_somatic",
+  "vcftools_filter_summary_freebayes_somatic",
+  "ensemblvep_vep_freebayes_somatic",
 ]
 output = ["{config.out_dir}/multiqc_report.html"]
 description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"
