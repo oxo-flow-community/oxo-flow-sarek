@@ -163,6 +163,16 @@ call_cnvkit = false
 # only_all — single-sample call-parallel over each samplesheet entry, no
 # paired mode); the port runs it over every cohort sample.
 call_lofreq = false
+# Varlociraptor statistical calling (upstream BAM_VARIANT_CALLING_*_VARLOCIRAPTOR:
+# per sample VCF_VARLOCIRAPTOR_* — estimate alignment-properties, preprocess,
+# `call variants --output P.bcf generic --scenario S --obs alias=vcf`,
+# filter-calls control-fdr local-smart, final sort). Bypasses the small-
+# variantcallers normalization/filtering path entirely. The port fans it over
+# every cohort sample with the candidate VCFs taken from the ported caller
+# outputs; scenarios ship as pre-rendered yaml (the single static sex = "XX"
+# renders sex_string=female, contamination fixed at 0.0).
+call_varlociraptor = false
+varlociraptor_fdr = 0.05     # upstream params.varlociraptor_fdr
 # CalculateContamination: GetPileupSummaries + CalculateContamination on the
 # pair, feeding FilterMutectCalls --contamination-table (upstream
 # contamination_estimation; requires a paired sample).
@@ -1942,6 +1952,98 @@ memory = "72G"
 
 [rules.environment]
 conda = "envs/lofreq.yaml"
+
+# Varlociraptor statistical calling (upstream POST_VARIANTCALLING wires
+# VCF_VARLOCIRAPTOR_{GERMLINE,TUMOR_ONLY,SOMATIC} on the published caller
+# VCFs; per sample: estimate alignment-properties, preprocess variants,
+# `call variants --output P.bcf generic --scenario S --obs alias=vcf`,
+# filter-calls control-fdr (local-smart), final bcftools sort). The port
+# fans the germline leg over every cohort sample with the haplotypecaller
+# VCF as the candidate, and the tumor-only leg over the same samples but
+# only where a mutect2 tumor-only VCF exists (empty-control rows in
+# config/somatic_pairs.tsv). Scenarios ship as pre-rendered yaml: the
+# upstream yte templates render sex_string=female for the port's fixed
+# sex = "XX", contamination fraction 0.0; the shared per-sample artifacts
+# carry the candidate-caller infix on the tumor-only leg to keep the two
+# legs' outputs distinct. Upstream runs no bcftools/vcftools QC on
+# varlociraptor outputs (they feed annotation only), so no QC family is
+# ported. The somatic pair leg (joint tumor/normal obs +
+# CONCAT_SOMATIC_STRELKA) is not ported yet.
+[[rules]]
+name = "varlociraptor_call_germline"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
+  "{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.vcf.gz",
+  "assets/varlociraptor_germline.yaml",
+]
+output = [
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.alignment-properties.json",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.haplotypecaller.germline.varlociraptor.vcf.gz",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.haplotypecaller.germline.varlociraptor.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.scenario.varlociraptor.yaml",
+]
+description = "Varlociraptor statistical germline calling on the haplotypecaller VCF (nf-core VCF_VARLOCIRAPTOR_GERMLINE; estimate alignment-properties, preprocess, call variants generic --obs normal=<candidate>, filter-calls control-fdr --events germline, final sort)"
+when = "config.call_varlociraptor"
+log = "logs/varlociraptor_call_germline_{sample}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/varlociraptor/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+varlociraptor estimate alignment-properties reference.fasta --bams {input[0]} > {sample}.alignment-properties.json
+varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.haplotypecaller.preprocess.bcf
+varlociraptor call variants --output {sample}.haplotypecaller.call.bcf generic --scenario {input[3]} --obs normal={input[2]}
+bcftools sort --output {sample}.haplotypecaller.sorted.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.haplotypecaller.call.bcf
+varlociraptor filter-calls control-fdr --mode local-smart {sample}.haplotypecaller.sorted.vcf.gz --events germline --fdr {config.varlociraptor_fdr} > {sample}.haplotypecaller.filtered.bcf
+bcftools sort --output {sample}.haplotypecaller.germline.varlociraptor.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.haplotypecaller.filtered.bcf
+mv {sample}.alignment-properties.json {sample}.haplotypecaller.germline.varlociraptor.vcf.gz {sample}.haplotypecaller.germline.varlociraptor.vcf.gz.tbi {config.out_dir}/variant_calling/varlociraptor/{sample}/
+cp {input[3]} {config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.scenario.varlociraptor.yaml
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/varlociraptor.yaml"
+
+[[rules]]
+name = "varlociraptor_call_tumor_only"
+input = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
+  "{config.out_dir}/variant_calling/mutect2/{sample}/{sample}.mutect2.vcf.gz",
+  "assets/varlociraptor_tumor_only.yaml",
+]
+output = [
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.mutect2.alignment-properties.json",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.mutect2.tumor_only.varlociraptor.vcf.gz",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.mutect2.tumor_only.varlociraptor.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.mutect2.scenario.varlociraptor.yaml",
+]
+description = "Varlociraptor statistical tumor-only calling on the mutect2 tumor-only VCF (nf-core VCF_VARLOCIRAPTOR_TUMOR_ONLY; estimate alignment-properties, preprocess, call variants generic --obs tumor=<candidate>, filter-calls control-fdr --events somatic_tumor_high somatic_tumor_low, final sort)"
+when = "config.call_varlociraptor"
+log = "logs/varlociraptor_call_tumor_only_{sample}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/varlociraptor/{sample}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+varlociraptor estimate alignment-properties reference.fasta --bams {input[0]} > {sample}.mutect2.alignment-properties.json
+varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.mutect2.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.mutect2.preprocess.bcf
+varlociraptor call variants --output {sample}.mutect2.call.bcf generic --scenario {input[3]} --obs tumor={input[2]}
+bcftools sort --output {sample}.mutect2.sorted.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.mutect2.call.bcf
+varlociraptor filter-calls control-fdr --mode local-smart {sample}.mutect2.sorted.vcf.gz --events somatic_tumor_high somatic_tumor_low --fdr {config.varlociraptor_fdr} > {sample}.mutect2.filtered.bcf
+bcftools sort --output {sample}.mutect2.tumor_only.varlociraptor.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.mutect2.filtered.bcf
+mv {sample}.mutect2.alignment-properties.json {sample}.mutect2.tumor_only.varlociraptor.vcf.gz {sample}.mutect2.tumor_only.varlociraptor.vcf.gz.tbi {config.out_dir}/variant_calling/varlociraptor/{sample}/
+cp {input[3]} {config.out_dir}/variant_calling/varlociraptor/{sample}/{sample}.mutect2.scenario.varlociraptor.yaml
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/varlociraptor.yaml"
 
 # MSIsensor-pro MSI scoring (upstream prepare_genome MSISENSORPRO_SCAN +
 # bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC, nf-core/sarek

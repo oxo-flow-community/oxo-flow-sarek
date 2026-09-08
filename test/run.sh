@@ -202,4 +202,32 @@ rm -f .lof-test-tmp.oxoflow
 trap - EXIT
 echo "  lofreq_call on (cohort fan-out + QC family); off by default"
 
+echo "==> varlociraptor branch: dry-run with call_varlociraptor (cohort fan-out)"
+# Upstream nf-core/sarek 3.10.0 wires varlociraptor via POST_VARIANTCALLING
+# (VCF_VARLOCIRAPTOR_GERMLINE on the published caller VCFs; per sample:
+# estimate alignment-properties, preprocess variants, call variants --output
+# P.bcf generic --scenario S --obs alias=<candidate>, filter-calls
+# control-fdr local-smart, final bcftools sort). The port fans the germline
+# leg over every cohort sample with the haplotypecaller VCF as the candidate,
+# and the tumor-only leg over the same samples but only where a mutect2
+# tumor-only VCF exists (empty-control rows in config/somatic_pairs.tsv).
+# This block flips call_varlociraptor and asserts the cohort instances
+# schedule (and stay off by default).
+sed 's/^call_varlociraptor = false$/call_varlociraptor = true/' main.oxoflow > .var-test-tmp.oxoflow
+trap 'rm -f .var-test-tmp.oxoflow' EXIT
+"$OXO" dry-run .var-test-tmp.oxoflow > /tmp/oxo-dryrun-var-$$.txt 2>&1
+for r in varlociraptor_call_germline_cohort_test varlociraptor_call_germline_cohort_test2 \
+         varlociraptor_call_tumor_only_cohort_test \
+         varlociraptor_call_tumor_only_cohort_test2; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-var-$$.txt \
+        || { echo "varlociraptor branch: ${r} not scheduled"; exit 1; }
+done
+# Default config must have no varlociraptor instance.
+if grep -qE "^  [0-9]+\. varlociraptor_[a-z_]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "varlociraptor branch: rule scheduled with default config"; exit 1
+fi
+rm -f .var-test-tmp.oxoflow
+trap - EXIT
+echo "  call_varlociraptor on (germline + tumor-only cohort fan-out); off by default"
+
 echo "PASS"
