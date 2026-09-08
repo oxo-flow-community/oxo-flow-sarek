@@ -146,6 +146,13 @@ call_manta_somatic = false
 # MUSE_CALL + MUSE_SUMP). Uses dbsnp + the wes flag for the sump -E/-G
 # (WES/WGS) mode switch.
 call_muse = false
+# MSIsensor-pro MSI scoring (upstream MSISENSORPRO_SCAN + MSISENSORPRO_MSISOMATIC).
+# Needs the prebuilt msi-scan list (scan file) as user data.
+call_msisensorpro = false
+# Set true when supplying your own msi-scan list (the msisensorpro_scan rule
+# then stays off; point msisensorpro_scan below at the file).
+msisensorpro_scan_ready = false
+msisensorpro_scan = "/data/references/GRCh38/Annotation/MSIsensorPro/Homo_sapiens_assembly38.msisensor_scan.list"
 # CalculateContamination: GetPileupSummaries + CalculateContamination on the
 # pair, feeding FilterMutectCalls --contamination-table (upstream
 # contamination_estimation; requires a paired sample).
@@ -1880,6 +1887,75 @@ memory = "72G"
 
 [rules.environment]
 conda = "envs/muse.yaml"
+
+# MSIsensor-pro MSI scoring (upstream prepare_genome MSISENSORPRO_SCAN +
+# bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC, nf-core/sarek
+# 3.10.0). MSISENSORPRO_SCAN runs `msisensor-pro scan` on the fasta once per
+# run to build the msi-scan list (skipped when the user supplies one via
+# msisensorpro_scan_ready); MSISENSORPRO_MSISOMATIC runs `msisensor-pro msi`
+# per tumor-normal pair: -d the scan list, -n the normal BAM, -t the tumor
+# BAM, -g the fasta (the port always passes it — upstream passes it whenever
+# fasta exists), -b the thread count. The report prefix is {pair} (files:
+# report, _dis, _germline, _somatic); published upstream to
+# variant_calling/msisensorpro/{pair}/. MultiQC has no msisensorpro module
+# (sompy is a different tool), so nothing feeds multiqc.
+[[rules]]
+name = "msisensorpro_scan"
+input = ["{config.fasta}"]
+output = [
+  "{config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list",
+  "{config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list.done",
+]
+description = "Build the MSIsensor-pro msi-scan list from the reference (nf-core MSISENSORPRO_SCAN)"
+when = "config.call_msisensorpro && !config.msisensorpro_scan_ready"
+log = "logs/msisensorpro_scan.log"
+shell = """
+mkdir -p {config.out_dir}/reference/msisensorpro
+cp -L {config.fasta} ./reference.fasta
+msisensor-pro scan -d reference.fasta -o {config.genome}.msisensor_scan.list
+mv {config.genome}.msisensor_scan.list {config.out_dir}/reference/msisensorpro/
+touch {config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list.done
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/msisensorpro.yaml"
+
+[[rules]]
+name = "msisensorpro_msi"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+  "{config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list",
+]
+output = [
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}",
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_dis",
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_germline",
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_somatic",
+]
+description = "MSIsensor-pro msi scoring on the tumor-normal pair (nf-core MSISENSORPRO_MSISOMATIC; -d scan list, -n normal, -t tumor)"
+when = "config.call_msisensorpro && wildcard.control != ''"
+log = "logs/msisensorpro_msi_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}
+cp -L {input[2]} ./msi_scan.list
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+msisensor-pro msi -d msi_scan.list -n {input[1]} -t {input[0]} -g reference.fasta -o {experiment}_vs_{control} -b {effective_threads}
+mv {experiment}_vs_{control} {experiment}_vs_{control}_dis {experiment}_vs_{control}_germline {experiment}_vs_{control}_somatic {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/
+touch {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_somatic.done
+"""
+
+[rules.resources]
+threads = 12
+memory = "72G"
+
+[rules.environment]
+conda = "envs/msisensorpro.yaml"
 
 # Manta somatic SV (upstream BAM_VARIANT_CALLING_MANTA with a normal BAM →
 # the somatic workflow; paired only — tumor-only SV runs the germline
