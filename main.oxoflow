@@ -163,6 +163,35 @@ call_cnvkit = false
 # only_all — single-sample call-parallel over each samplesheet entry, no
 # paired mode); the port runs it over every cohort sample.
 call_lofreq = false
+# ASCAT paired somatic CNV (upstream BAM_VARIANT_CALLING_SOMATIC_ASCAT: ASCAT
+# per pair via ascat.prepareHTS/loadData/aspcf/runAscat). Paired-only upstream
+# (skipped for empty-control rows). Needs the G1000 allele/loci files (user
+# data; the upstream single-file test layout — e.g.
+# G1000_alleles_hg38_chr22.txt / G1000_loci_hg38_chr22.txt or an unzipped
+# directory of per-chromosome files — is supported).
+call_ascat = false
+ascat_alleles = "/data/references/GRCh38/Annotation/ASCAT/G1000_alleles_hg38_chr22.txt"
+ascat_loci = "/data/references/GRCh38/Annotation/ASCAT/G1000_loci_hg38_chr22.txt"
+ascat_purity = ""           # optional manual tumor purity (rho_manual); empty = estimate
+ascat_ploidy = ""           # optional manual ploidy (psi_manual); empty = estimate
+# Control-FREEC somatic CNV (upstream FREEC_SOMATIC +
+# CONTROLFREEC_ASSESSSIGNIFICANCE + CONTROLFREEC_FREEC2BED, fed by the paired
+# mpileup legs). WES/WGS switches derive from the wes flag (upstream
+# conf/modules/controlfreec.config ext.args).
+call_controlfreec = false
+cf_ploidy = "2"             # upstream params.cf_ploidy
+cf_coeff = 0.05             # upstream params.cf_coeff (coefficientOfVariation)
+cf_contamination = 0        # upstream params.cf_contamination
+cf_contamination_adjustment = false   # upstream params.cf_contamination_adjustment
+cf_mincov = 0               # upstream params.cf_mincov (BAF minimalCoveragePerPosition)
+cf_minqual = 0              # upstream params.cf_minqual (BAF minimalQualityPerPosition)
+cf_window = ""              # upstream params.cf_window; empty = unset
+# MSIsensor2 MSI scoring, tumor-only (upstream MSISENSOR2_MSI, wired only on
+# bam_variant_calling_tumor_only_all). Needs the prebuilt models tarball as
+# user data (upstream igenomes: Annotation/MSIsensor2/models_hg38/...tar.gz;
+# the rule untars it to models/ before -M).
+call_msisensor2 = false
+msisensor2_models = "/data/references/GRCh38/Annotation/MSIsensor2/models_hg38.tar.gz"
 # Varlociraptor statistical calling (upstream BAM_VARIANT_CALLING_*_VARLOCIRAPTOR:
 # per sample VCF_VARLOCIRAPTOR_* — estimate alignment-properties, preprocess,
 # `call variants --output P.bcf generic --scenario S --obs alias=vcf`,
@@ -1347,12 +1376,12 @@ conda = "envs/bcftools.yaml"
 
 # Somatic bcftools mpileup + call. Upstream of_somatic_all.nf only runs
 # BAM_VARIANT_CALLING_MPILEUP inside the controlfreec branch in paired mode —
-# the mpileup TEXT feeds BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC and no
-# somatic mpileup VCF is published on the paired path. The port has no
-# controlfreec leg yet, so the paired instance exists to keep the rule set
-# shape-faithful but is wired for completeness; the tumor-only instance
-# (control empty) is the real upstream behavior: OF_TUMOR_ONLY_ALL publishes
-# the mpileup VCF when tools contains mpileup, mixed into vcf_all.
+# the mpileup TEXT feeds BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC (ported as
+# the controlfreec_mpileup rule below) and no somatic mpileup VCF is
+# published on the paired path. This paired instance keeps the rule set
+# shape-faithful for the tools flag; the tumor-only instance (control empty)
+# is the real upstream behavior: OF_TUMOR_ONLY_ALL publishes the mpileup VCF
+# when tools contains mpileup, mixed into vcf_all.
 [[rules]]
 name = "bcftools_mpileup_call_somatic"
 input = [
@@ -2215,6 +2244,230 @@ memory = "6G"
 
 [rules.environment]
 conda = "envs/cnvkit.yaml"
+
+# --- ASCAT / Control-FREEC / MSIsensor2 (upstream BAM_VARIANT_CALLING_ --
+# --- SOMATIC_ASCAT, BAM_VARIANT_CALLING_SOMATIC/TUMOR_ONLY_CONTROLFREEC, --
+# --- MSISENSOR2_MSI) ------------------------------------------------------
+
+# ASCAT paired somatic CNV (upstream ASCAT module: ascat.prepareHTS via
+# alleleCounter over tumor+normal CRAMs, loadData, aspcf, runAscat, metrics;
+# publish dir variant_calling/ascat/${meta.id}). The R pipeline ships as a
+# pre-staged asset (assets/ascat_run.R, commandArgs-parameterized) to avoid
+# oxo-flow {token} substitution colliding with R braces. Paired-only
+# upstream — skipped for empty-control rows. alleleCounter reads CRAMs
+# directly (htslib) with the fasta passed via -r, so no BAM conversion.
+[[rules]]
+name = "ascat_somatic"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/{experiment}_vs_{control}.segments.txt",
+  "{config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/{experiment}_vs_{control}.cnvs.txt",
+  "{config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/{experiment}_vs_{control}.purityploidy.txt",
+  "{config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/{experiment}_vs_{control}.metrics.txt",
+]
+description = "ASCAT somatic CNV on the tumor-normal pair (nf-core ASCAT: prepareHTS -> loadData -> aspcf -> runAscat; R pipeline from assets/ascat_run.R)"
+when = "config.call_ascat && wildcard.control != ''"
+log = "logs/ascat_somatic_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}
+Rscript assets/ascat_run.R {experiment}_vs_{control} {input[0]} {input[1]} {config.ascat_alleles} {config.ascat_loci} {config.fasta} {config.sex} "c(1:22, 'X')" $([ -n "{config.ascat_purity}" ] && echo -E {config.ascat_purity} || echo -E NULL) $([ -n "{config.ascat_ploidy}" ] && echo -E {config.ascat_ploidy} || echo -E NULL) {effective_threads}
+mv {experiment}_vs_{control}.segments.txt {experiment}_vs_{control}.cnvs.txt {experiment}_vs_{control}.purityploidy.txt {experiment}_vs_{control}.metrics.txt {config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 8
+memory = "32G"
+
+[rules.environment]
+conda = "envs/ascat.yaml"
+
+# Control-FREEC somatic CNV, control-normalized ratio (upstream
+# BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC: MPILEUP_NORMAL + MPILEUP_TUMOR
+# samtools mpileup legs bgzip'ed, then FREEC_SOMATIC with a [sample]/[control]
+# mpileup config; outputDir = ${PWD}/${prefix}, CNVs + ratio + BAF published
+# via FREEC_.*). Unset options (chrFiles / mappability / GC profile /
+# makePileup) echo blank lines, which FREEC ignores — matching upstream, where
+# those channels are empty for the default WGS path. sex comes from config.sex
+# (upstream meta.sex); WES/WGS switches derive from the wes flag.
+[[rules]]
+name = "controlfreec_mpileup"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/work/controlfreec/{experiment}_vs_{control}/normal.mpileup.gz",
+  "{config.out_dir}/work/controlfreec/{experiment}_vs_{control}/tumor.mpileup.gz",
+]
+description = "samtools mpileup on the tumor-normal pair for Control-FREEC (nf-core MPILEUP_NORMAL/MPILEUP_TUMOR; bgzip'ed)"
+when = "config.call_controlfreec && wildcard.control != ''"
+log = "logs/controlfreec_mpileup_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/work/controlfreec/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+samtools mpileup --fasta-ref reference.fasta --output normal.mpileup {input[1]}
+bgzip normal.mpileup
+samtools mpileup --fasta-ref reference.fasta --output tumor.mpileup {input[0]}
+bgzip tumor.mpileup
+mv normal.mpileup.gz tumor.mpileup.gz {config.out_dir}/work/controlfreec/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 4
+memory = "16G"
+
+[rules.environment]
+conda = "envs/control-freec.yaml"
+
+[[rules]]
+name = "controlfreec_freec"
+input = [
+  "{config.out_dir}/work/controlfreec/{experiment}_vs_{control}/normal.mpileup.gz",
+  "{config.out_dir}/work/controlfreec/{experiment}_vs_{control}/tumor.mpileup.gz",
+]
+output = [
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.CNVs",
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.ratio.txt",
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.BAF.txt",
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.info.txt",
+]
+description = "Control-FREEC copy-number calling on the pair mpileups (nf-core FREEC_SOMATIC: generated config.txt with [sample]/[control] mpileup sections + BAF piling; freec -conf config.txt)"
+when = "config.call_controlfreec && wildcard.control != ''"
+log = "logs/controlfreec_freec_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control} output
+touch config.txt
+echo "[general]" >> config.txt
+echo "bedgraphoutput = TRUE" >> config.txt
+echo "breakPointThreshold = $([ "{config.wes}" = "true" ] && echo -E 1.2 || echo -E 0.8)" >> config.txt
+echo "breakPointType = $([ "{config.wes}" = "true" ] && echo -E 4 || echo -E 2)" >> config.txt
+echo "coefficientOfVariation = {config.cf_coeff}" >> config.txt
+echo "contamination = $([ "{config.cf_contamination}" = "0" ] && echo -E "" || echo -E {config.cf_contamination})" >> config.txt
+echo "contaminationAdjustment = $([ "{config.cf_contamination_adjustment}" = "true" ] && echo -E TRUE || echo -E "")" >> config.txt
+echo "forceGCcontentNormalization = $([ "{config.wes}" = "true" ] && echo -E 1 || echo -E 0)" >> config.txt
+echo "minimalSubclonePresence = $([ "{config.wes}" = "true" ] && echo -E 30 || echo -E 20)" >> config.txt
+echo "maxThreads = {effective_threads}" >> config.txt
+echo "noisyData = $([ "{config.wes}" = "true" ] && echo -E TRUE || echo -E FALSE)" >> config.txt
+echo "ploidy = {config.cf_ploidy}" >> config.txt
+echo "printNA = $([ "{config.wes}" = "true" ] && echo -E FALSE || echo -E TRUE)" >> config.txt
+echo "readCountThreshold = $([ "{config.wes}" = "true" ] && echo -E 50 || echo -E 10)" >> config.txt
+echo "sex = {config.sex}" >> config.txt
+echo "window = $([ -n "{config.cf_window}" ] && echo -E {config.cf_window} || echo -E "")" >> config.txt
+echo "[control]" >> config.txt
+echo "mateFile = {input[0]}" >> config.txt
+echo "inputFormat = pileup" >> config.txt
+echo "mateOrientation = FR" >> config.txt
+echo "[sample]" >> config.txt
+echo "mateFile = {input[1]}" >> config.txt
+echo "inputFormat = pileup" >> config.txt
+echo "mateOrientation = FR" >> config.txt
+echo "[BAF]" >> config.txt
+echo "minimalCoveragePerPosition = $([ "{config.cf_mincov}" = "0" ] && echo -E "" || echo -E {config.cf_mincov})" >> config.txt
+echo "minimalQualityPerPosition = $([ "{config.cf_minqual}" = "0" ] && echo -E "" || echo -E {config.cf_minqual})" >> config.txt
+freec -conf config.txt
+find . -name "*_info.txt" -exec mv "{{}}" {experiment}_vs_{control}.info.txt ';'
+find . -name "*.ratio.txt" -exec mv "{{}}" {experiment}_vs_{control}.ratio.txt ';'
+find . -name "*BAF.txt" -exec mv "{{}}" {experiment}_vs_{control}.BAF.txt ';'
+find . -name "*CNVs" -exec mv "{{}}" {experiment}_vs_{control}.CNVs ';'
+mv {experiment}_vs_{control}.info.txt {experiment}_vs_{control}.ratio.txt {experiment}_vs_{control}.BAF.txt {experiment}_vs_{control}.CNVs {config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 8
+memory = "32G"
+
+[rules.environment]
+conda = "envs/control-freec.yaml"
+
+# CONTROLFREEC_ASSESSSIGNIFICANCE (upstream: cat $(which assess_significance.R)
+# | R --slave --args ${cnvs} ${ratio}; mv *.p.value.txt ${prefix}.p.value.txt).
+# The 11.6b conda package ships assess_significance.R.
+[[rules]]
+name = "controlfreec_assesssignificance"
+input = [
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.CNVs",
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.ratio.txt",
+]
+output = [
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.p.value.txt",
+]
+description = "Control-FREEC p-value assessment of CNVs (nf-core CONTROLFREEC_ASSESSSIGNIFICANCE: assess_significance.R over CNVs + ratio)"
+when = "config.call_controlfreec && wildcard.control != ''"
+log = "logs/controlfreec_assesssignificance_{experiment}_vs_{control}.log"
+shell = """
+cat $(which assess_significance.R) | R --slave --args {input[0]} {input[1]}
+mv *.p.value.txt {config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.p.value.txt
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/control-freec.yaml"
+
+# CONTROLFREEC_FREEC2BED (upstream: freec2bed.pl -f ${ratio} ${args} >
+# ${prefix}.bed with args = params.cf_ploidy). FREEC2CIRCOS + MAKEGRAPH2 are
+# deliberately not ported (circos/plot deps — see README fidelity table).
+[[rules]]
+name = "controlfreec2bed"
+input = [
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.ratio.txt",
+]
+output = [
+  "{config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.bed",
+]
+description = "Control-FREEC ratio to BED copy-number segments (nf-core CONTROLFREEC_FREEC2BED; ploidy passed positionally)"
+when = "config.call_controlfreec && wildcard.control != ''"
+log = "logs/controlfreec2bed_{experiment}_vs_{control}.log"
+shell = """
+freec2bed.pl -f {input[0]} {config.cf_ploidy} > {config.out_dir}/variant_calling/controlfreec/{experiment}_vs_{control}/{experiment}_vs_{control}.bed
+"""
+
+[rules.resources]
+threads = 1
+memory = "2G"
+
+[rules.environment]
+conda = "envs/control-freec.yaml"
+
+# MSIsensor2 MSI scoring, tumor-only (upstream MSISENSOR2_MSI, wired ONLY on
+# bam_variant_calling_tumor_only_all; container msisensor2:0.1). args = the
+# upstream wes switch (params.wes ? '-c 20' : '-c 15' — minimum coverage).
+# -M expects the unpacked models/ directory, so the rule untars the tarball
+# first. Follows the freebayes_somatic_tumor_only gate: empty-control rows.
+[[rules]]
+name = "msisensor2_msi"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.recal_index_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/msisensor2/{experiment}/{experiment}.msi",
+  "{config.out_dir}/variant_calling/msisensor2/{experiment}/{experiment}.msi_dis",
+  "{config.out_dir}/variant_calling/msisensor2/{experiment}/{experiment}.msi_somatic",
+]
+description = "MSIsensor2 microsatellite instability scoring, tumor-only (nf-core MSISENSOR2_MSI: msi -b threads -c WES?20:15 -M models -t tumor -o prefix)"
+when = "config.call_msisensor2 && wildcard.control == ''"
+log = "logs/msisensor2_msi_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/msisensor2/{experiment}
+cp -L {input[0]} ./tumor.{config.alignment_ext}
+cp -L {input[1]} ./tumor.{config.recal_index_ext}
+tar xzf {config.msisensor2_models}
+msisensor2 msi -b {effective_threads} $([ "{config.wes}" = "true" ] && echo -E "-c 20" || echo -E "-c 15") -M models -t tumor.{config.alignment_ext} -o {experiment}
+mv {experiment} {experiment}_dis {experiment}_somatic {config.out_dir}/variant_calling/msisensor2/{experiment}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "72G"
+
+[rules.environment]
+conda = "envs/msisensor2.yaml"
 
 # Manta somatic SV (upstream BAM_VARIANT_CALLING_MANTA with a normal BAM →
 # the somatic workflow; paired only — tumor-only SV runs the germline

@@ -230,4 +230,41 @@ rm -f .var-test-tmp.oxoflow
 trap - EXIT
 echo "  call_varlociraptor on (germline + tumor-only cohort fan-out); off by default"
 
+echo "==> somatic ascat/controlfreec/msisensor2 branch: dry-run with the three flags + filled pair sheet"
+# Upstream nf-core/sarek 3.10.0: BAM_VARIANT_CALLING_SOMATIC_ASCAT (ASCAT per
+# pair, R pipeline via alleleCounter), BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC
+# (MPILEUP_NORMAL + MPILEUP_TUMOR -> FREEC_SOMATIC -> ASSESS_SIGNIFICANCE +
+# FREEC2BED), and MSISENSOR2_MSI wired ONLY on the tumor-only path
+# (bam_variant_calling_tumor_only_all, -c 20 WES / -c 15 WGS). The port flips
+# call_ascat + call_controlfreec + call_msisensor2 and asserts the paired
+# chains schedule with a pair row while msisensor2 schedules for the
+# empty-control (tumor-only) row only.
+sed 's/^call_ascat = false$/call_ascat = true/; s/^call_controlfreec = false$/call_controlfreec = true/; s/^call_msisensor2 = false$/call_msisensor2 = true/' \
+    main.oxoflow > .acf-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\npair1\ttest\ttest2\ntumoronly\ttest\t\n' > config/somatic_pairs.tsv
+trap 'rm -f .acf-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
+# NOTE: no --samples here — same reason as the tiddit block above.
+"$OXO" dry-run .acf-test-tmp.oxoflow > /tmp/oxo-dryrun-acf-$$.txt 2>&1
+for r in ascat_somatic_pair1 \
+         controlfreec_mpileup_pair1 \
+         controlfreec_freec_pair1 \
+         controlfreec_assesssignificance_pair1 \
+         controlfreec2bed_pair1 \
+         msisensor2_msi_tumoronly; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-acf-$$.txt \
+        || { echo "ascat/controlfreec/msisensor2 branch: ${r} not scheduled"; exit 1; }
+done
+# msisensor2 is tumor-only upstream — it must NOT schedule for the pair.
+if grep -qE "^  [0-9]+\. msisensor2_msi_pair1[^ ]*  \[run" /tmp/oxo-dryrun-acf-$$.txt; then
+    echo "ascat/controlfreec/msisensor2 branch: msisensor2 scheduled for a paired row"; exit 1
+fi
+# Default config must have no ascat/controlfreec/msisensor2 instance.
+if grep -qE "^  [0-9]+\. [a-z_]*(ascat|controlfreec|msisensor2)[a-z_0-9]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "ascat/controlfreec/msisensor2 branch: rule scheduled with default config"; exit 1
+fi
+rm -f .acf-test-tmp.oxoflow
+git checkout -q config/somatic_pairs.tsv
+trap - EXIT
+echo "  ascat_somatic + controlfreec chain paired; msisensor2 tumor-only; off by default"
+
 echo "PASS"
