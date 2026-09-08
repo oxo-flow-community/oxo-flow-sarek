@@ -68,6 +68,16 @@ vep_species = "homo_sapiens"
 vep_cache_version = 112
 vep_dir_cache = "/.vep"
 vep_cache_ready = false
+# snpEff annotation (upstream SNPEFF_SNPEFF via VCF_ANNOTATE_SNPEFF): the
+# database is just the name of a db installed under snpEff's data dir
+# (e.g. "GRCh38.99"); the data dir is user data (upstream bundles it in
+# the container) — the snpEff rules gate on snpeff_data_ready, and their
+# shells fail fast if snpeff_db is left empty. Upstream also supports
+# SnpSift annmem databases + upstream merge / bcftools annotate (bcfann):
+# not ported (see README fidelity table).
+annotate_snpeff = false
+snpeff_db = ""
+snpeff_data_ready = false
 
 # Sample metadata — mirrors tests/csv/3.0/fastq_single.csv (single-lane model:
 # nf-core/sarek meta.id = "{sample}-{lane}", read-group ID = "{sample}.{lane}")
@@ -3270,6 +3280,271 @@ memory = "36G"
 conda = "envs/vep.yaml"
 
 # ---------------------------------------------------------------------------
+# SNP annotation fan-out — upstream VCF_ANNOTATE_SNPEFF (SNPEFF_SNPEFF +
+# HTSLIB_BGZIPTABIX), run on every caller's published VCF exactly like VEP
+# above (sarek.nf vcf_all). The snpEff database is a plain string name under
+# the data dir; the rules gate on snpeff_data_ready and their shells fail
+# fast when snpeff_db is empty. Output naming follows upstream ext.prefix =
+# vcf basename minus '.vcf' + '_snpeff.ann': '<stem>_snpeff.ann.vcf.gz' +
+# .tbi + -csvStats CSV for MultiQC. SnpSift annmem/vardb and the upstream
+# merge / bcftools annotate (bcfann) options are not ported.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "snpeff_snpeff"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/haplotypecaller/{sample}/{sample}.haplotypecaller.filtered_snpeff.ann.csv",
+]
+description = "snpEff annotation of filtered germline variants (nf-core SNPEFF_SNPEFF; requires a snpEff database under the data dir — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_haplotypecaller && !config.joint_germline && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/haplotypecaller/{sample} {config.out_dir}/reports/SnpEff/haplotypecaller/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.haplotypecaller.filtered_snpeff.ann {input[0]} > {sample}.haplotypecaller.filtered_snpeff.ann.vcf
+bgzip -c {sample}.haplotypecaller.filtered_snpeff.ann.vcf > {sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz
+mv {sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz {sample}.haplotypecaller.filtered_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/{sample}/
+mv {sample}.haplotypecaller.filtered_snpeff.ann.csv {config.out_dir}/reports/SnpEff/haplotypecaller/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_freebayes"
+input = ["{config.out_dir}/variant_calling/freebayes/{sample}/{sample}.freebayes.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/freebayes/{sample}/{sample}.freebayes.filtered_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/freebayes/{sample}/{sample}.freebayes.filtered_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/freebayes/{sample}/{sample}.freebayes.filtered_snpeff.ann.csv",
+]
+description = "snpEff annotation of freebayes germline variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_freebayes && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_freebayes.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/freebayes/{sample} {config.out_dir}/reports/SnpEff/freebayes/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.freebayes.filtered_snpeff.ann {input[0]} > {sample}.freebayes.filtered_snpeff.ann.vcf
+bgzip -c {sample}.freebayes.filtered_snpeff.ann.vcf > {sample}.freebayes.filtered_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.freebayes.filtered_snpeff.ann.vcf.gz
+mv {sample}.freebayes.filtered_snpeff.ann.vcf.gz {sample}.freebayes.filtered_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/freebayes/{sample}/
+mv {sample}.freebayes.filtered_snpeff.ann.csv {config.out_dir}/reports/SnpEff/freebayes/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_strelka"
+input = ["{config.out_dir}/variant_calling/strelka/{sample}/{sample}.strelka.variants.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/strelka/{sample}/{sample}.strelka.variants_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/strelka/{sample}/{sample}.strelka.variants_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/strelka/{sample}/{sample}.strelka.variants_snpeff.ann.csv",
+]
+description = "snpEff annotation of strelka germline variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_strelka && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_strelka.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/strelka/{sample} {config.out_dir}/reports/SnpEff/strelka/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.strelka.variants_snpeff.ann {input[0]} > {sample}.strelka.variants_snpeff.ann.vcf
+bgzip -c {sample}.strelka.variants_snpeff.ann.vcf > {sample}.strelka.variants_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.strelka.variants_snpeff.ann.vcf.gz
+mv {sample}.strelka.variants_snpeff.ann.vcf.gz {sample}.strelka.variants_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/strelka/{sample}/
+mv {sample}.strelka.variants_snpeff.ann.csv {config.out_dir}/reports/SnpEff/strelka/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_mpileup"
+input = ["{config.out_dir}/variant_calling/bcftools/{sample}/{sample}.bcftools.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/bcftools/{sample}/{sample}.bcftools_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/bcftools/{sample}/{sample}.bcftools_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/bcftools/{sample}/{sample}.bcftools_snpeff.ann.csv",
+]
+description = "snpEff annotation of bcftools mpileup variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_mpileup && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_mpileup.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/bcftools/{sample} {config.out_dir}/reports/SnpEff/bcftools/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.bcftools_snpeff.ann {input[0]} > {sample}.bcftools_snpeff.ann.vcf
+bgzip -c {sample}.bcftools_snpeff.ann.vcf > {sample}.bcftools_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.bcftools_snpeff.ann.vcf.gz
+mv {sample}.bcftools_snpeff.ann.vcf.gz {sample}.bcftools_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/bcftools/{sample}/
+mv {sample}.bcftools_snpeff.ann.csv {config.out_dir}/reports/SnpEff/bcftools/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_deepvariant"
+input = ["{config.out_dir}/variant_calling/deepvariant/{sample}/{sample}.deepvariant.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/deepvariant/{sample}/{sample}.deepvariant_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/deepvariant/{sample}/{sample}.deepvariant_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/deepvariant/{sample}/{sample}.deepvariant_snpeff.ann.csv",
+]
+description = "snpEff annotation of deepvariant variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_deepvariant && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_deepvariant.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/deepvariant/{sample} {config.out_dir}/reports/SnpEff/deepvariant/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.deepvariant_snpeff.ann {input[0]} > {sample}.deepvariant_snpeff.ann.vcf
+bgzip -c {sample}.deepvariant_snpeff.ann.vcf > {sample}.deepvariant_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.deepvariant_snpeff.ann.vcf.gz
+mv {sample}.deepvariant_snpeff.ann.vcf.gz {sample}.deepvariant_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/deepvariant/{sample}/
+mv {sample}.deepvariant_snpeff.ann.csv {config.out_dir}/reports/SnpEff/deepvariant/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_manta"
+input = ["{config.out_dir}/variant_calling/manta/{sample}/{sample}.manta.diploid_sv.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/manta/{sample}/{sample}.manta.diploid_sv_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/manta/{sample}/{sample}.manta.diploid_sv_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/manta/{sample}/{sample}.manta.diploid_sv_snpeff.ann.csv",
+]
+description = "snpEff annotation of manta diploid SV variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_manta && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_manta.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/manta/{sample} {config.out_dir}/reports/SnpEff/manta/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.manta.diploid_sv_snpeff.ann {input[0]} > {sample}.manta.diploid_sv_snpeff.ann.vcf
+bgzip -c {sample}.manta.diploid_sv_snpeff.ann.vcf > {sample}.manta.diploid_sv_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.manta.diploid_sv_snpeff.ann.vcf.gz
+mv {sample}.manta.diploid_sv_snpeff.ann.vcf.gz {sample}.manta.diploid_sv_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/manta/{sample}/
+mv {sample}.manta.diploid_sv_snpeff.ann.csv {config.out_dir}/reports/SnpEff/manta/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_tiddit"
+input = ["{config.out_dir}/variant_calling/tiddit/{sample}/{sample}.tiddit.vcf"]
+output = [
+  "{config.out_dir}/annotation/tiddit/{sample}/{sample}.tiddit_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/tiddit/{sample}/{sample}.tiddit_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/tiddit/{sample}/{sample}.tiddit_snpeff.ann.csv",
+]
+description = "snpEff annotation of tiddit SV variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_tiddit && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_tiddit.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/tiddit/{sample} {config.out_dir}/reports/SnpEff/tiddit/{sample}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {sample}.tiddit_snpeff.ann {input[0]} > {sample}.tiddit_snpeff.ann.vcf
+bgzip -c {sample}.tiddit_snpeff.ann.vcf > {sample}.tiddit_snpeff.ann.vcf.gz
+tabix -p vcf {sample}.tiddit_snpeff.ann.vcf.gz
+mv {sample}.tiddit_snpeff.ann.vcf.gz {sample}.tiddit_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/tiddit/{sample}/
+mv {sample}.tiddit_snpeff.ann.csv {config.out_dir}/reports/SnpEff/tiddit/{sample}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+[[rules]]
+name = "snpeff_snpeff_joint"
+input = ["{config.out_dir}/variant_calling/haplotypecaller/joint_variant_calling/joint_germline_recalibrated.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/haplotypecaller/joint_variant_calling/joint_germline_recalibrated_snpeff.ann.csv",
+]
+description = "snpEff annotation of the recalibrated joint VCF (nf-core SNPEFF_SNPEFF on vcf_all; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_haplotypecaller && config.joint_germline && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_joint.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/haplotypecaller/joint_variant_calling {config.out_dir}/reports/SnpEff/haplotypecaller/joint_variant_calling
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats joint_germline_recalibrated_snpeff.ann {input[0]} > joint_germline_recalibrated_snpeff.ann.vcf
+bgzip -c joint_germline_recalibrated_snpeff.ann.vcf > joint_germline_recalibrated_snpeff.ann.vcf.gz
+tabix -p vcf joint_germline_recalibrated_snpeff.ann.vcf.gz
+mv joint_germline_recalibrated_snpeff.ann.vcf.gz joint_germline_recalibrated_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/haplotypecaller/joint_variant_calling/
+mv joint_germline_recalibrated_snpeff.ann.csv {config.out_dir}/reports/SnpEff/haplotypecaller/joint_variant_calling/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+# Somatic FreeBayes snpEff fan-out: mirrors the germline snpeff_snpeff family
+# exactly, consuming the pair-fanned freebayessomatic VCFs (upstream mixes
+# SOMATIC_ALL.out.vcf_all into the same ANNOTATE channel as germline).
+[[rules]]
+name = "snpeff_snpeff_freebayes_somatic"
+input = ["{config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered.vcf.gz"]
+output = [
+  "{config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz",
+  "{config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz.tbi",
+  "{config.out_dir}/reports/SnpEff/freebayessomatic/{experiment}_vs_{control}/{experiment}_vs_{control}.freebayes.filtered_snpeff.ann.csv",
+]
+description = "snpEff annotation of somatic freebayes variants (nf-core SNPEFF_SNPEFF; requires a snpEff database — gated on snpeff_data_ready, fails fast when snpeff_db is unset)"
+when = "config.call_freebayes && wildcard.control != '' && config.annotate_snpeff && config.snpeff_data_ready"
+log = "logs/snpeff_snpeff_freebayes_somatic.log"
+shell = """
+test -n "{config.snpeff_db}" || {{ echo "ERROR: config.snpeff_db is empty — set it to the snpEff database name (e.g. GRCh38.99) under the data dir, then set snpeff_data_ready = true" >&2; exit 1; }}
+mkdir -p {config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control} {config.out_dir}/reports/SnpEff/freebayessomatic/{experiment}_vs_{control}
+snpEff -Xmx{effective_memory_mb}m -XX:-UsePerfData {config.snpeff_db} -csvStats {experiment}_vs_{control}.freebayes.filtered_snpeff.ann {input[0]} > {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf
+bgzip -c {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf > {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz
+tabix -p vcf {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz
+mv {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.vcf.gz.tbi {config.out_dir}/annotation/freebayessomatic/{experiment}_vs_{control}/
+mv {experiment}_vs_{control}.freebayes.filtered_snpeff.ann.csv {config.out_dir}/reports/SnpEff/freebayessomatic/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 6
+memory = "36G"
+
+[rules.environment]
+conda = "envs/snpeff.yaml"
+
+# ---------------------------------------------------------------------------
 # Per-chromosome scatter/gather branch (optional, gated by scatter_gatk).
 # Upstream PREPARE_INTERVALS (BUILD_INTERVALS gawk over the .fai ->
 # CREATE_INTERVALS_BED duration-binned split -> TABIX_BGZIPTABIX) then
@@ -3681,6 +3956,15 @@ depends_on = [
   "vcftools_tstv_qual_joint",
   "vcftools_filter_summary_joint",
   "ensemblvep_vep_joint",
+  "snpeff_snpeff",
+  "snpeff_snpeff_freebayes",
+  "snpeff_snpeff_strelka",
+  "snpeff_snpeff_mpileup",
+  "snpeff_snpeff_deepvariant",
+  "snpeff_snpeff_manta",
+  "snpeff_snpeff_tiddit",
+  "snpeff_snpeff_joint",
+  "snpeff_snpeff_freebayes_somatic",
   "fgbio_groupreadsbyumi",
   "bcftools_mpileup_ngscheckmate",
   "ngscheckmate_ncm",
