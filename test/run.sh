@@ -154,4 +154,28 @@ git checkout -q config/somatic_pairs.tsv
 trap - EXIT
 echo "  msisensorpro_scan + msisensorpro_msi on with a filled pair sheet; scan off with scan_ready; off by default"
 
+echo "==> somatic cnvkit branch: dry-run with call_cnvkit + filled pair sheet"
+# Upstream nf-core/sarek 3.10.0 BAM_VARIANT_CALLING_CNVKIT: CNVKIT_BATCH (per
+# pair, tumor then normal; samtools CRAM->BAM conversion; wes-flag hybrid/wgs
+# method switch) -> CNVKIT_CALL -> CNVKIT_EXPORT ("vcf", prefix {pair}.cnvcall)
+# + CNVKIT_GENEMETRICS. The port flips call_cnvkit and asserts all three port
+# rules schedule with a pair row (and stay off by default).
+sed 's/^call_cnvkit = false$/call_cnvkit = true/' main.oxoflow > .cnv-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\npair1\ttest\ttest2\n' > config/somatic_pairs.tsv
+trap 'rm -f .cnv-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
+# NOTE: no --samples here — same reason as the tiddit block above.
+"$OXO" dry-run .cnv-test-tmp.oxoflow > /tmp/oxo-dryrun-cnv-$$.txt 2>&1
+for r in cnvkit_batch_pair1 cnvkit_genemetrics_pair1 cnvkit_export_pair1; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-cnv-$$.txt \
+        || { echo "somatic cnvkit branch: ${r} not scheduled"; exit 1; }
+done
+# Default config must have no cnvkit instance (header-only sheet).
+if grep -qE "^  [0-9]+\. cnvkit_[a-z_]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "somatic cnvkit branch: rule scheduled with default config"; exit 1
+fi
+rm -f .cnv-test-tmp.oxoflow
+git checkout -q config/somatic_pairs.tsv
+trap - EXIT
+echo "  cnvkit_batch + cnvkit_genemetrics + cnvkit_export on with a filled pair sheet; off by default"
+
 echo "PASS"
