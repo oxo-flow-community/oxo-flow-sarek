@@ -93,4 +93,30 @@ git checkout -q config/somatic_pairs.tsv
 trap - EXIT
 echo "  freebayes/mpileup somatic chain + tumor-only on with filled sheet; off by default"
 
+echo "==> somatic muse branch: dry-run with call_muse + filled pair sheet"
+# Upstream nf-core/sarek 3.10.0 BAM_VARIANT_CALLING_SOMATIC_MUSE: MUSE_CALL
+# (`MuSE call` on the pair, tumor BAM then normal BAM, *.MuSE.txt) +
+# MUSE_SUMP (`MuSE sump` against dbsnp with the upstream -ot timestamp guard,
+# then bgzip + tabix). Both take params.wes ? '-E' : '-G' as ext.args. The
+# port drives it through the [[pairs]] fan-out from config/somatic_pairs.tsv;
+# the shipped sheet is header-only. This block flips call_muse and asserts
+# both muse rules schedule with a pair row (and stay off by default).
+sed 's/^call_muse = false$/call_muse = true/' main.oxoflow > .muse-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\npair1\ttest\ttest2\n' > config/somatic_pairs.tsv
+trap 'rm -f .muse-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
+# NOTE: no --samples here — same reason as the tiddit block above.
+"$OXO" dry-run .muse-test-tmp.oxoflow > /tmp/oxo-dryrun-muse-$$.txt 2>&1
+for r in muse_call_pair1 muse_sump_pair1; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-muse-$$.txt \
+        || { echo "somatic muse branch: ${r} not scheduled"; exit 1; }
+done
+# Default config must have no muse instance (header-only sheet).
+if grep -qE "^  [0-9]+\. muse_[a-z_]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "somatic muse branch: rule scheduled with default config"; exit 1
+fi
+rm -f .muse-test-tmp.oxoflow
+git checkout -q config/somatic_pairs.tsv
+trap - EXIT
+echo "  muse_call + muse_sump on with a filled pair sheet; off by default"
+
 echo "PASS"
