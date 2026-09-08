@@ -119,4 +119,39 @@ git checkout -q config/somatic_pairs.tsv
 trap - EXIT
 echo "  muse_call + muse_sump on with a filled pair sheet; off by default"
 
+echo "==> somatic msisensorpro branch: dry-run with call_msisensorpro + filled pair sheet"
+# Upstream nf-core/sarek 3.10.0: prepare_genome MSISENSORPRO_SCAN (`msisensor-pro
+# scan` on the fasta, saved only with save_reference/build_only_index) +
+# bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC (`msisensor-pro msi`
+# per pair: -d the scan list, -n normal, -t tumor, -g fasta, -b threads). The
+# port flips call_msisensorpro and asserts the scan rule runs once, the msi
+# rule schedules with a pair row, and both stay off by default; with
+# msisensorpro_scan_ready=true the scan rule must not schedule.
+sed 's/^call_msisensorpro = false$/call_msisensorpro = true/' main.oxoflow > .msi-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\npair1\ttest\ttest2\n' > config/somatic_pairs.tsv
+trap 'rm -f .msi-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
+# NOTE: no --samples here — same reason as the tiddit block above.
+"$OXO" dry-run .msi-test-tmp.oxoflow > /tmp/oxo-dryrun-msi-$$.txt 2>&1
+for r in msisensorpro_scan msisensorpro_msi_pair1; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-msi-$$.txt \
+        || { echo "somatic msisensorpro branch: ${r} not scheduled"; exit 1; }
+done
+# With a user-supplied scan list the scan rule must stay off.
+sed 's/^call_msisensorpro = false$/call_msisensorpro = true/; s/^msisensorpro_scan_ready = false$/msisensorpro_scan_ready = true/' \
+    main.oxoflow > .msi-test-tmp2.oxoflow
+"$OXO" dry-run .msi-test-tmp2.oxoflow > /tmp/oxo-dryrun-msi2-$$.txt 2>&1
+if grep -qE "^  [0-9]+\. msisensorpro_scan[^ ]*  \[run" /tmp/oxo-dryrun-msi2-$$.txt; then
+    echo "somatic msisensorpro branch: scan rule scheduled despite msisensorpro_scan_ready"; exit 1
+fi
+grep -qE "^  [0-9]+\. msisensorpro_msi_pair1[^ ]*  \[run" /tmp/oxo-dryrun-msi2-$$.txt \
+    || { echo "somatic msisensorpro branch: msi rule missing with scan_ready"; exit 1; }
+# Default config must have no msisensorpro instance (header-only sheet).
+if grep -qE "^  [0-9]+\. msisensorpro_[a-z_]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "somatic msisensorpro branch: rule scheduled with default config"; exit 1
+fi
+rm -f .msi-test-tmp.oxoflow .msi-test-tmp2.oxoflow
+git checkout -q config/somatic_pairs.tsv
+trap - EXIT
+echo "  msisensorpro_scan + msisensorpro_msi on with a filled pair sheet; scan off with scan_ready; off by default"
+
 echo "PASS"
