@@ -153,6 +153,10 @@ call_msisensorpro = false
 # then stays off; point msisensorpro_scan below at the file).
 msisensorpro_scan_ready = false
 msisensorpro_scan = "/data/references/GRCh38/Annotation/MSIsensorPro/Homo_sapiens_assembly38.msisensor_scan.list"
+# CNVkit CNV calling (upstream BAM_VARIANT_CALLING_CNVKIT: CNVKIT_BATCH ->
+# CNVKIT_CALL -> CNVKIT_EXPORT + CNVKIT_GENEMETRICS). Uses the wes flag for
+# the hybrid/wgs batch method switch.
+call_cnvkit = false
 # CalculateContamination: GetPileupSummaries + CalculateContamination on the
 # pair, feeding FilterMutectCalls --contamination-table (upstream
 # contamination_estimation; requires a paired sample).
@@ -1956,6 +1960,108 @@ memory = "72G"
 
 [rules.environment]
 conda = "envs/msisensorpro.yaml"
+
+# CNVkit CNV calling (upstream BAM_VARIANT_CALLING_CNVKIT: CNVKIT_BATCH with
+# generate_pon=false -> CNVKIT_CALL -> CNVKIT_EXPORT (args "vcf", prefix
+# {pair}.cnvcall) + CNVKIT_GENEMETRICS). CNVKIT_BATCH runs per pair (meta.id
+# = {pair} upstream — the cram channel is pair-shaped, tumor first then
+# normal; indexes are unused, the module re-indexes internally after samtools
+# CRAM->BAM conversion). ext.args = wes ? "--method hybrid --diagram --scatter"
+# : "--method wgs --diagram --scatter" via bash-level substitution (no ternary
+# in oxoflow). CRAM inputs are converted with samtools view first (the module
+# runs samtools only when inputs are CRAM — cnvkit runs natively on CRAM but
+# is prohibitively slow). All outputs publish upstream to
+# variant_calling/cnvkit/{pair}/: batch (*.bed,*.cnn,*.cnr,*.cns,*.pdf,*.png),
+# call (*{pair}.call.cns), export ({pair}.cnvcall.vcf), genemetrics
+# ({pair}.targetcoverage.genemetrics.tsv — upstream prefix is
+# {cnr.baseName}.genemetrics; the port's cnr baseName is the pair prefix).
+# MultiQC has no cnvkit module in sarek's multiqc_config (nothing feeds
+# multiqc).
+[[rules]]
+name = "cnvkit_batch"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+  "{config.fasta}",
+  "{config.fasta_fai}",
+]
+output = [
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.antitarget.bed",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.target.bed",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.targetcoverage.cnn",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.antitargetcoverage.cnn",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.cnr",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.cns",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.call.cns",
+]
+description = "CNVkit batch coverage/segmentation on the tumor-normal pair (nf-core CNVKIT_BATCH; method hybrid for WES, wgs for WGS)"
+when = "config.call_cnvkit && wildcard.control != ''"
+log = "logs/cnvkit_batch_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+samtools view -T reference.fasta --fai-reference reference.fasta.fai {input[0]} -@ {effective_threads} -o tumor.bam
+samtools index tumor.bam
+samtools view -T reference.fasta --fai-reference reference.fasta.fai {input[1]} -@ {effective_threads} -o normal.bam
+samtools index normal.bam
+cnvkit.py batch tumor.bam --normal normal.bam --fasta reference.fasta $([ "{config.wes}" = "true" ] && echo -E '--method hybrid --diagram --scatter' || echo -E '--method wgs --diagram --scatter') --processes {effective_threads} --output-reference my_reference.cnn
+mv *.bed *.cnn *.cnr *.cns *.pdf *.png {config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "36G"
+
+[rules.environment]
+conda = "envs/cnvkit.yaml"
+
+[[rules]]
+name = "cnvkit_genemetrics"
+input = [
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.cnr",
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.call.cns",
+]
+output = [
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.targetcoverage.genemetrics.tsv",
+]
+description = "CNVkit gene-level metrics from batch coverage (nf-core CNVKIT_GENEMETRICS; --segments the call.cns)"
+when = "config.call_cnvkit && wildcard.control != ''"
+log = "logs/cnvkit_genemetrics_{experiment}_vs_{control}.log"
+shell = """
+cnvkit.py genemetrics {input[0]} --segments {input[1]} --output {experiment}_vs_{control}.targetcoverage.genemetrics.tsv
+mv {experiment}_vs_{control}.targetcoverage.genemetrics.tsv {config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/cnvkit.yaml"
+
+[[rules]]
+name = "cnvkit_export"
+input = [
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.call.cns",
+]
+output = [
+  "{config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/{experiment}_vs_{control}.cnvcall.vcf",
+]
+description = "Export CNVkit segments to VCF (nf-core CNVKIT_EXPORT; args vcf, prefix {pair}.cnvcall)"
+when = "config.call_cnvkit && wildcard.control != ''"
+log = "logs/cnvkit_export_{experiment}_vs_{control}.log"
+shell = """
+cnvkit.py export vcf {input[0]} -o {experiment}_vs_{control}.cnvcall.vcf
+mv {experiment}_vs_{control}.cnvcall.vcf {config.out_dir}/variant_calling/cnvkit/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 1
+memory = "6G"
+
+[rules.environment]
+conda = "envs/cnvkit.yaml"
 
 # Manta somatic SV (upstream BAM_VARIANT_CALLING_MANTA with a normal BAM →
 # the somatic workflow; paired only — tumor-only SV runs the germline
