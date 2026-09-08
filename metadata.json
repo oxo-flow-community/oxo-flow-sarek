@@ -111,6 +111,8 @@
     "mosdepth_md",
     "mosdepth_recal",
     "multiqc",
+    "muse_call",
+    "muse_sump",
     "ngscheckmate_ncm",
     "samtools_bam2fq_consensus",
     "samtools_bam2fq_umi",
@@ -169,13 +171,13 @@
   ],
   "excluded": [
     "Sentieon / Parabricks / DRAGMAP — commercial accelerators (licensed binaries), out of scope",
-    "MUSE (upstream subworkflow bam_variant_calling_somatic_muse: MUSE_CALL + MUSE_SUMP) — somatic SNV caller not ported; needs its own env + tumor/normal fixtures",
+    "MUSE (upstream subworkflow bam_variant_calling_somatic_muse: MUSE_CALL + MUSE_SUMP) — ported (call_muse, pair-fanned via config/somatic_pairs.tsv; uses dbsnp + the wes flag for the sump -E/-G switch)",
     "MSIsensorpro (modules/nf-core/msisensorpro: scan + msisomatic) — MSI caller not ported; needs own env + model data + fixtures",
     "CNVkit / ASCAT / Control-FREEC / MSIsensor2 / LoFreq / Varlociraptor — the remaining somatic callers that exist in upstream 3.10.0; Mutect2 / Strelka2-somatic / Manta-somatic are ported (call_mutect2 / call_strelka_somatic / call_manta_somatic, pair-fanned via config/somatic_pairs.tsv); the rest need their own envs/fixtures. (SomaticSniper and VarDict are NOT upstream 3.10.0 features — absent from the nextflow_schema.json tools enum and from all wired subworkflows — so they are not listed)",
     "Annotation beyond VEP: SnpSift annmem databases (modules/nf-core/snpsift; upstream prepare_snpsift_databases / SNPSIFT_ANNMEM / SNPSIFT_ANNMEMCREATE) and the upstream merge / bcftools annotate (bcfann) options — not ported; the port annotates every caller VCF with VEP or snpEff (annotate_snpeff, gated on snpeff_data_ready)",
     "Non-default I/O and prep paths not ported: gatk4spark Spark BQSR/ApplyBQSR/MarkDuplicates (modules/nf-core/gatk4spark; subworkflows bam_applybqsr_spark / bam_baserecalibrator_spark / bam_markduplicates_spark), bbsplit/bbmap genomic-contaminant split (fastq_preprocess_gatk), SPRING compressed FASTQ input (samplesheet_to_channel spring_1/spring_2; nf-core/spring), and untar-based reference download in prepare_genome (UNTAR_BBSPLIT_INDEX / UNTAR_CHR_DIR / UNTAR_MSISENSOR2_MODELS) — the port runs non-Spark GATK4, accepts raw FASTQ.gz, and requires user-provided reference files"
   ],
-  "rule_count": 141,
+  "rule_count": 143,
   "tools": [
     "fastqc",
     "fastp",
@@ -186,6 +188,7 @@
     "mosdepth",
     "fgbio",
     "freebayes",
+    "muse",
     "strelka",
     "manta",
     "tiddit",
@@ -200,7 +203,7 @@
     "gawk",
     "multiqc"
   ],
-  "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM (or BWA-MEM2) alignment, MarkDuplicates with CRAM or BAM output, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling with CNN 1D scoring and tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report. Optional ported branches (all gated off by default): reference preparation (BWA/BWAmem2 index, .dict, .fai), UMI-aware consensus calling (fgbio chain + fastp), fastp split-parts fan-out (split_parts=true: runtime-discovered per-part BWA-MEM/BWA-MEM2 alignment + BAM merge + index, no input cap), FreeBayes, Strelka2 germline, Manta germline, bcftools mpileup, TIDDIT SV (germline plus somatic per-pair calling with SVDB merge via config/somatic_pairs.tsv), somatic FreeBayes (tumor-normal joint call plus tumor-only mode with the nf-core sort/tabix/vcffilter chain and per-caller QC) and somatic bcftools mpileup (tumor-only VCF published; paired leg shape-faithful for the future Control-FREEC feed), goleft indexcov, DeepVariant, NGSCheckMate sample-identity QC, the joint-germline path (GVCF mode + GenomicsDBImport + GenotypeGVCFs + VQSR), per-caller VCF QC + VEP annotation (upstream fan-out over every enabled caller), optional snpEff annotation of every caller VCF (annotate_snpeff, gated on snpeff_data_ready with fail-fast shells when snpeff_db is unset), and the per-chromosome scatter/gather branch (scatter_gatk=true) that ports upstream interval preparation + GATK4_GATHERBQSRREPORTS / CRAM/BAM_MERGE_INDEX_SAMTOOLS / GATK4_MERGEVCFS with one job per chromosome.",
+  "description": "GATK best-practice variant calling for whole-genome and whole-exome sequencing (WGS/WES), germline by default: FastQC quality control, fastp trimming and splitting, BWA-MEM (or BWA-MEM2) alignment, MarkDuplicates with CRAM or BAM output, base quality score recalibration (BQSR), single-sample HaplotypeCaller variant calling with CNN 1D scoring and tranche filtering, VEP annotation, per-sample VCF QC and a final MultiQC report. Optional ported branches (all gated off by default): reference preparation (BWA/BWAmem2 index, .dict, .fai), UMI-aware consensus calling (fgbio chain + fastp), fastp split-parts fan-out (split_parts=true: runtime-discovered per-part BWA-MEM/BWA-MEM2 alignment + BAM merge + index, no input cap), FreeBayes, Strelka2 germline, Manta germline, bcftools mpileup, TIDDIT SV (germline plus somatic per-pair calling with SVDB merge via config/somatic_pairs.tsv), somatic FreeBayes (tumor-normal joint call plus tumor-only mode with the nf-core sort/tabix/vcffilter chain and per-caller QC) and somatic bcftools mpileup (tumor-only VCF published; paired leg shape-faithful for the future Control-FREEC feed), somatic MuSE (call_muse, tumor-normal pair via config/somatic_pairs.tsv, dbsnp-annotated sump with the upstream -ot guard), goleft indexcov, DeepVariant, NGSCheckMate sample-identity QC, the joint-germline path (GVCF mode + GenomicsDBImport + GenotypeGVCFs + VQSR), per-caller VCF QC + VEP annotation (upstream fan-out over every enabled caller), optional snpEff annotation of every caller VCF (annotate_snpeff, gated on snpeff_data_ready with fail-fast shells when snpeff_db is unset), and the per-chromosome scatter/gather branch (scatter_gatk=true) that ports upstream interval preparation + GATK4_GATHERBQSRREPORTS / CRAM/BAM_MERGE_INDEX_SAMTOOLS / GATK4_MERGEVCFS with one job per chromosome.",
   "installation": {
     "engine": "oxo-flow >= 0.17.0",
     "toolchain": "conda environments (envs/*.yaml) with optional Singularity docker:// image pins",
@@ -208,6 +211,7 @@
       "paired-end FASTQ reads at raw/{sample}_R1.fastq.gz / raw/{sample}_R2.fastq.gz",
       "GRCh38 genome FASTA plus .fai and .dict",
       "GRCh38 BWA index directory (bwa_index_dir); bwa_mem2_index_dir when aligner = \"bwa-mem2\"",
+      "config/somatic_pairs.tsv filled with pair_id/experiment/control rows when any somatic caller is enabled (MuSE included)",
       "GATK bundle known-sites VCFs with .tbi: dbsnp_146.hg38.vcf.gz, Mills_and_1000G_gold_standard.indels.hg38.vcf.gz, Homo_sapiens_assembly38.known_indels.vcf.gz; known_snps + known_snps_tbi for joint VQSR",
       "VEP cache (GRCh38, homo_sapiens, cache version 112) mounted at /.vep in the container",
       "snpEff database under a snpEff data dir when annotate_snpeff = true (snpeff_db = db name, snpeff_data_ready = true)",

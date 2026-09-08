@@ -142,6 +142,10 @@ call_deepvariant = false
 call_mutect2 = false
 call_strelka_somatic = false
 call_manta_somatic = false
+# MuSE tumor-normal somatic SNV (upstream BAM_VARIANT_CALLING_SOMATIC_MUSE:
+# MUSE_CALL + MUSE_SUMP). Uses dbsnp + the wes flag for the sump -E/-G
+# (WES/WGS) mode switch.
+call_muse = false
 # CalculateContamination: GetPileupSummaries + CalculateContamination on the
 # pair, feeding FilterMutectCalls --contamination-table (upstream
 # contamination_estimation; requires a paired sample).
@@ -1805,6 +1809,77 @@ memory = "24G"
 
 [rules.environment]
 singularity = "docker://quay.io/biocontainers/strelka:2.9.10--h9ee0642_1"
+
+# MuSE tumor-normal somatic SNV (upstream BAM_VARIANT_CALLING_SOMATIC_MUSE:
+# MUSE_CALL + MUSE_SUMP). MUSE_CALL runs `MuSE call` on the pair (tumor BAM
+# first, normal second, per the upstream module) emitting *.MuSE.txt;
+# MUSE_SUMP runs `MuSE sump` against dbsnp (with the upstream -ot timestamp
+# guard: MuSE complains if the dbsnp index is older than the VCF), then
+# bgzip + tabix. Both processes take params.wes ? '-E' : '-G' as ext.args
+# (WES vs WGS); the port drives it through the [[pairs]] fan-out from
+# config/somatic_pairs.tsv. Prefixes mirror upstream: call uses "{pair}"
+# (the tool adds .MuSE.), sump appends .muse. MuSE.txt is published upstream
+# (*.txt pattern) but MultiQC has no muse module, so nothing feeds multiqc;
+# the sump VCF/tbi are the emitted variants.
+[[rules]]
+name = "muse_call"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+]
+output = [
+  "{config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.MuSE.txt",
+  "{config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.MuSE.txt.done",
+]
+description = "MuSE call on the tumor-normal pair (nf-core MUSE_CALL; ext.args = wes ? '-E' : '-G', tumor BAM then normal BAM)"
+when = "config.call_muse && wildcard.control != ''"
+log = "logs/muse_call_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/muse/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+MuSE call "$( [ "{config.wes}" = "true" ] && echo -E || echo -G )" -f reference.fasta -O {experiment}_vs_{control} -n {effective_threads} {input[0]} {input[1]}
+mv {experiment}_vs_{control}.MuSE.txt {config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/
+touch {config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.MuSE.txt.done
+"""
+
+[rules.resources]
+threads = 12
+memory = "72G"
+
+[rules.environment]
+conda = "envs/muse.yaml"
+
+[[rules]]
+name = "muse_sump"
+input = [
+  "{config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.MuSE.txt",
+  "{config.dbsnp}",
+  "{config.dbsnp_tbi}",
+]
+output = [
+  "{config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.muse.vcf.gz",
+  "{config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/{experiment}_vs_{control}.muse.vcf.gz.tbi",
+]
+description = "MuSE sump with dbsnp annotation (nf-core MUSE_SUMP; -ot timestamp guard on the dbsnp index, then bgzip + tabix)"
+when = "config.call_muse && wildcard.control != ''"
+log = "logs/muse_sump_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/muse/{experiment}_vs_{control}
+cp -L {config.dbsnp} {config.dbsnp_tbi} .
+[ "$(basename {config.dbsnp_tbi})" -ot "$(basename {config.dbsnp})" ] && touch "$(basename {config.dbsnp_tbi})"
+MuSE sump "$( [ "{config.wes}" = "true" ] && echo -E || echo -G )" -I {input[0]} -n {effective_threads} -D $(basename {config.dbsnp}) -O {experiment}_vs_{control}.muse.vcf
+bgzip --threads {effective_threads} {experiment}_vs_{control}.muse.vcf
+tabix -p vcf {experiment}_vs_{control}.muse.vcf.gz
+mv {experiment}_vs_{control}.muse.vcf.gz {experiment}_vs_{control}.muse.vcf.gz.tbi {config.out_dir}/variant_calling/muse/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 12
+memory = "72G"
+
+[rules.environment]
+conda = "envs/muse.yaml"
 
 # Manta somatic SV (upstream BAM_VARIANT_CALLING_MANTA with a normal BAM →
 # the somatic workflow; paired only — tumor-only SV runs the germline
