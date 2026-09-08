@@ -1,0 +1,12 @@
+# Upstream nf-core/sarek 3.10.0 varlociraptor module envs (per-module
+# environment.yml pins: bioconda::varlociraptor=8.9.5). htslib/samtools
+# bundled for the in-module CRAM handling and index steps, bcftools for the
+# merge/concat calls around the generic call leg.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bioconda::varlociraptor=8.9.5
+  - bioconda::htslib=1.21
+  - bioconda::samtools=1.21
+  - bioconda::bcftools=1.23.1
