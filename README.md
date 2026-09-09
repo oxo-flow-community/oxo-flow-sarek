@@ -256,15 +256,19 @@ Live-verification status of the two newest gated branches:
   (samtools 1.24 default) which the gatk4 4.5.0.0 reader rejects
   (`CRAM version 3.1 is not supported`); the merge now pins
   `-O cram,version=3.0` like the markduplicates rule.
-- the per-caller VCF_QC + VEP fan-out (30 rules over
-  `call_freebayes`/`call_strelka`/`call_mpileup`/`call_deepvariant`/
-  `call_manta`/`call_tiddit`, plus the paired somatic FreeBayes `_somatic`
-  QC/VEP family) — still needs live verification (VEP cache
-  required); dry-run covers all six callers at once; tiddit's `--vcf`
-  vcftools invocation in particular needs a live check.
-
-A reasonable smoke sequence for the remaining branch: one optional caller
-with QC+VEP on a small WES slice.
+- the per-caller VCF_QC + VEP fan-out (QC + `ensembl-vep 115.2` with a
+  26 GB GRCh38 v111 cache, `--fork 6`) — **live-verified on bioinfo-wsx
+  2026-09-09** against a two-sample WES slice. FreeBayes annotation passed
+  end-to-end (20 records, full CSQ, summary.html, tabix indexes); a manual
+  VEP run on the unfiltered Haplotypecaller VCF annotated all 22 records,
+  proving the germline annotation path itself. Two data/engine findings
+  surfaced (both documented in [#8]): FilterVariantTranches on novel WES
+  variants with zero exact-start resource overlap throws a GATK UserException
+  that the engine masks as exit 0, leaving a header-only VCF that VEP then
+  cannot parse — the same "0 SNPs in region" limitation nf-core sarek
+  documents; and the bare-basename `tabix` reads in the four freebayes
+  `tabix_*` rules failed at the workdir-root cwd (`tbx_index_build3
+  failed`), fixed by indexing via `{input[0]}`.
 
 ## License
 
