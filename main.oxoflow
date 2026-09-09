@@ -405,7 +405,7 @@ shell = """
 [ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
 fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
 mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
-mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv [0-9]*.{sample}-{config.lane}_R[12].fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
 mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
 """
 
@@ -437,7 +437,7 @@ shell = """
 [ ! -f  {sample}-{config.lane}_R2.fastq.gz ] && ln -sf raw/{sample}_R2.fastq.gz {sample}-{config.lane}_R2.fastq.gz
 fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
 mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
-mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv [0-9]*.{sample}-{config.lane}_R[12].fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
 mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
 """
 
@@ -622,7 +622,7 @@ shell = """
 [ ! -f {sample}-{config.lane}_R2.fastq.gz ] && ln -sf {config.out_dir}/preprocessing/umi/{sample}/{sample}-{config.lane}_2.fq.gz {sample}-{config.lane}_R2.fastq.gz
 fastp --in1 {sample}-{config.lane}_R1.fastq.gz --in2 {sample}-{config.lane}_R2.fastq.gz --out1 {sample}-{config.lane}_R1.fastp.fastq.gz --out2 {sample}-{config.lane}_R2.fastp.fastq.gz --json {sample}-{config.lane}.fastp.json --html {sample}-{config.lane}.fastp.html --thread 12 --detect_adapter_for_pe --disable_adapter_trimming --split_by_lines $(({config.split_fastq} * 4)) --length_required {config.length_required} 2> {sample}-{config.lane}.fastp.log
 mkdir -p {config.out_dir}/preprocessing/fastp/{sample} {config.out_dir}/reports/fastp/{sample}
-mv *.fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
+mv [0-9]*.{sample}-{config.lane}_R[12].fastp.fastq.gz {config.out_dir}/preprocessing/fastp/{sample}/
 mv {sample}-{config.lane}.fastp.json {sample}-{config.lane}.fastp.html {sample}-{config.lane}.fastp.log {config.out_dir}/reports/fastp/{sample}/
 """
 
