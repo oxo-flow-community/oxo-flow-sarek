@@ -1224,8 +1224,8 @@ when = "config.call_freebayes"
 log = "logs/tabix_freebayes.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
-tabix -p vcf -f {sample}.freebayes.vcf.gz
-mv {sample}.freebayes.vcf.gz.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
+tabix -p vcf -f {input[0]}
+mv {input[0]}.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
 """
 
 [rules.resources]
@@ -1264,8 +1264,8 @@ when = "config.call_freebayes"
 log = "logs/tabix_freebayes_filt.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/freebayes/{sample}
-tabix -p vcf -f {sample}.freebayes.filtered.vcf.gz
-mv {sample}.freebayes.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
+tabix -p vcf -f {input[0]}
+mv {input[0]}.tbi {config.out_dir}/variant_calling/freebayes/{sample}/
 """
 
 [rules.resources]
@@ -2590,8 +2590,8 @@ when = "config.call_freebayes && wildcard.control != ''"
 log = "logs/tabix_freebayes_somatic_{experiment}_vs_{control}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
-tabix -p vcf -f {experiment}_vs_{control}.freebayes.vcf.gz
-mv {experiment}_vs_{control}.freebayes.vcf.gz.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+tabix -p vcf -f {input[0]}
+mv {input[0]}.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
 """
 
 [rules.resources]
@@ -2630,8 +2630,8 @@ when = "config.call_freebayes && wildcard.control != ''"
 log = "logs/tabix_freebayes_somatic_filt_{experiment}_vs_{control}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}
-tabix -p vcf -f {experiment}_vs_{control}.freebayes.filtered.vcf.gz
-mv {experiment}_vs_{control}.freebayes.filtered.vcf.gz.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
+tabix -p vcf -f {input[0]}
+mv {input[0]}.tbi {config.out_dir}/variant_calling/freebayessomatic/{experiment}_vs_{control}/
 """
 
 [rules.resources]
