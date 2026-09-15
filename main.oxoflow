@@ -4810,7 +4810,11 @@ depends_on = [
   "vcftools_filter_summary_lofreq",
   "ensemblvep_vep_lofreq",
 ]
-output = ["{config.out_dir}/multiqc_report.html"]
+output = [
+    "{config.out_dir}/multiqc_report.html",
+    "{config.out_dir}/multiqc_data/",
+    "{config.out_dir}/multiqc_plots/",
+]
 description = "Aggregate QC reports with MultiQC (nf-core MULTIQC)"
 when = "!config.skip_multiqc"
 shell = """
