@@ -42,13 +42,17 @@ genome = "GRCh38"
 aligner = "bwa-mem"
 trim_fastq = false
 split_fastq = 50000000          # fastp --split_by_lines = split_fastq * 4
-# Runtime-discovered split parts: when true, fastp's --split_by_lines parts
-# are discovered by filesystem scan (engine output_pattern primitive) and the
+# Runtime-discovered split parts: fastp's --split_by_lines parts are
+# discovered by filesystem scan (engine output_pattern primitive) and the
 # BWA_MEM + BAM_MERGE_INDEX_SAMTOOLS stages fan out per part — no 0001-only
 # cap. Requires mapped_bam = "sorted" (the merge output name). Not supported
-# with umi_read_structure. Off by default (upstream single-part behavior).
-split_parts = false
-mapped_bam = "0001"             # mapped bam stem fed to markduplicates: {sample}.{mapped_bam}.bam ("sorted" with split_parts = true)
+# with umi_read_structure. On by default (fidelity: upstream aligns every
+# part; the single-part path silently drops parts 0002+ whenever fastp's
+# multi-thread --split_by_lines emits them — live-verified 8 parts for an
+# 8000-pair input on 12 threads). Set false to force the single-part path
+# (mapped_bam = "0001") for debugging.
+split_parts = true
+mapped_bam = "sorted"           # mapped bam stem fed to markduplicates: {sample}.{mapped_bam}.bam ("sorted" with split_parts = true)
 length_required = 15
 wes = false
 save_output_as_bam = false      # CRAM output mode (upstream default)
