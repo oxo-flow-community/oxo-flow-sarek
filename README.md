@@ -194,9 +194,11 @@ Deviations (all documented, nothing silently dropped):
   `fastp_split`'s final `mv` lands all parts at once — then runs
   BAM_MERGE_INDEX_SAMTOOLS exactly once. A failed per-part alignment fails the
   run (fail-fast cancels the waiting merge), so the wait cannot hang on a
-  healthy pipeline. `split_parts` is off by default and the default path is
-  unchanged: single part `0001.` -> `{sample}.0001.bam` (the upstream
-  `tokenize('.')[0]` behavior), so small/medium inputs never see the new
+  healthy pipeline. `split_parts = true` is the default (flipped by the
+  data-loss fix — the historical default aligned part `0001.` only, silently
+  dropping parts 0002+ that fastp's multi-thread `--split_by_lines` emits);
+  `split_parts = false` pins `mapped_bam = "0001"` and aligns part 0001 only,
+  which small/medium inputs that fit a single part may use to skip the merge
   machinery. UMI consensus mode (`umi_read_structure`) is not supported with
   `split_parts` — the two gates are mutually exclusive.
 - **scatter/gather is opt-in and uses per-chromosome intervals**: the
