@@ -2,7 +2,7 @@ oxo-flow-sarek
 Copyright (c) 2026 oxo-flow-community
 
 This pipeline is a port of nf-core/sarek
-(https://github.com/nf-core/sarek), version 3.10.0, authored by
+(https://github.com/nf-core/sarek), version 3.12.0, authored by
 The nf-core/sarek team.
 
 Licensed under the Apache License, Version 2.0 (the "License");

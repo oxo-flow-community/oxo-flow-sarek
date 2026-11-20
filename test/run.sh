@@ -19,7 +19,7 @@ echo "==> debug: expanded commands contain no literal {wildcards}"
 "$OXO" debug main.oxoflow 2>&1 | grep -q '{sample}' && { echo "unexpanded wildcards in debug output"; exit 1; } || true
 
 echo "==> somatic pairs branch: dry-run with a filled pair sheet + call_tiddit"
-# Upstream nf-core/sarek 3.10.0 BAM_VARIANT_CALLING_SOMATIC_TIDDIT: TIDDIT
+# Upstream nf-core/sarek 3.12.0 BAM_VARIANT_CALLING_SOMATIC_TIDDIT: TIDDIT
 # per pair member ({id}.tiddit.normal / {id}.tiddit.tumor, no --skip_assembly
 # — the pair legs receive the bwa index) + SVDB_MERGE (args2 --output-type z).
 # The port drives it through the [[pairs]] fan-out from
@@ -50,7 +50,7 @@ trap - EXIT
 echo "  tiddit_sv_somatic + svdb_merge_tiddit on with a filled pair sheet; off by default"
 
 echo "==> somatic freebayes/mpileup branch: dry-run with call_freebayes + call_mpileup"
-# Upstream nf-core/sarek 3.10.0: paired somatic FreeBayes is a joint two-BAM
+# Upstream nf-core/sarek 3.12.0: paired somatic FreeBayes is a joint two-BAM
 # call (normal first, tumor second) followed by BCFTOOLS_SORT / TABIX /
 # VCFLIB_VCFFILTER / TABIX and the per-caller VCF_QC_BCFTOOLS_VCFTOOLS fan-out;
 # the paired mpileup leg feeds Control-FREEC only (no published VCF), while the
@@ -94,7 +94,7 @@ trap - EXIT
 echo "  freebayes/mpileup somatic chain + tumor-only on with filled sheet; off by default"
 
 echo "==> somatic muse branch: dry-run with call_muse + filled pair sheet"
-# Upstream nf-core/sarek 3.10.0 BAM_VARIANT_CALLING_SOMATIC_MUSE: MUSE_CALL
+# Upstream nf-core/sarek 3.12.0 BAM_VARIANT_CALLING_SOMATIC_MUSE: MUSE_CALL
 # (`MuSE call` on the pair, tumor BAM then normal BAM, *.MuSE.txt) +
 # MUSE_SUMP (`MuSE sump` against dbsnp with the upstream -ot timestamp guard,
 # then bgzip + tabix). Both take params.wes ? '-E' : '-G' as ext.args. The
@@ -120,7 +120,7 @@ trap - EXIT
 echo "  muse_call + muse_sump on with a filled pair sheet; off by default"
 
 echo "==> somatic msisensorpro branch: dry-run with call_msisensorpro + filled pair sheet"
-# Upstream nf-core/sarek 3.10.0: prepare_genome MSISENSORPRO_SCAN (`msisensor-pro
+# Upstream nf-core/sarek 3.12.0: prepare_genome MSISENSORPRO_SCAN (`msisensor-pro
 # scan` on the fasta, saved only with save_reference/build_only_index) +
 # bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC (`msisensor-pro msi`
 # per pair: -d the scan list, -n normal, -t tumor, -g fasta, -b threads). The
@@ -155,7 +155,7 @@ trap - EXIT
 echo "  msisensorpro_scan + msisensorpro_msi on with a filled pair sheet; scan off with scan_ready; off by default"
 
 echo "==> somatic cnvkit branch: dry-run with call_cnvkit + filled pair sheet"
-# Upstream nf-core/sarek 3.10.0 BAM_VARIANT_CALLING_CNVKIT: CNVKIT_BATCH (per
+# Upstream nf-core/sarek 3.12.0 BAM_VARIANT_CALLING_CNVKIT: CNVKIT_BATCH (per
 # pair, tumor then normal; samtools CRAM->BAM conversion; wes-flag hybrid/wgs
 # method switch) -> CNVKIT_CALL -> CNVKIT_EXPORT ("vcf", prefix {pair}.cnvcall)
 # + CNVKIT_GENEMETRICS. The port flips call_cnvkit and asserts all three port
@@ -179,7 +179,7 @@ trap - EXIT
 echo "  cnvkit_batch + cnvkit_genemetrics + cnvkit_export on with a filled pair sheet; off by default"
 
 echo "==> lofreq branch: dry-run with call_lofreq (cohort fan-out)"
-# Upstream nf-core/sarek 3.10.0 wires lofreq only on the tumor-only path
+# Upstream nf-core/sarek 3.12.0 wires lofreq only on the tumor-only path
 # (BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ: LOFREQ_CALLPARALLEL per sample,
 # ext.args "--call-indels", prefix ${meta.id}.lofreq); there is no paired
 # lofreq leg. The port fans lofreq_call over every cohort sample with a
@@ -203,7 +203,7 @@ trap - EXIT
 echo "  lofreq_call on (cohort fan-out + QC family); off by default"
 
 echo "==> varlociraptor branch: dry-run with call_varlociraptor (cohort fan-out)"
-# Upstream nf-core/sarek 3.10.0 wires varlociraptor via POST_VARIANTCALLING
+# Upstream nf-core/sarek 3.12.0 wires varlociraptor via POST_VARIANTCALLING
 # (VCF_VARLOCIRAPTOR_GERMLINE on the published caller VCFs; per sample:
 # estimate alignment-properties, preprocess variants, call variants --output
 # P.bcf generic --scenario S --obs alias=<candidate>, filter-calls
@@ -211,12 +211,17 @@ echo "==> varlociraptor branch: dry-run with call_varlociraptor (cohort fan-out)
 # leg over every cohort sample with the haplotypecaller VCF as the candidate,
 # and the tumor-only leg over the same samples but only where a mutect2
 # tumor-only VCF exists (empty-control rows in config/somatic_pairs.tsv).
-# This block flips call_varlociraptor and asserts the cohort instances
-# schedule (and stay off by default).
-sed 's/^call_varlociraptor = false$/call_varlociraptor = true/' main.oxoflow > .var-test-tmp.oxoflow
-trap 'rm -f .var-test-tmp.oxoflow' EXIT
+# This block flips call_varlociraptor + call_mutect2 and asserts the cohort
+# instances schedule (and stay off by default). The tumor-only varlociraptor
+# leg is gated on the mutect2 tumor-only VCF — so call_mutect2 must be on and
+# the pair sheet must carry an empty-control row, or the leg's VCF input is a
+# non-existent workflow-level file and the instance never schedules.
+sed 's/^call_varlociraptor = false$/call_varlociraptor = true/; s/^call_mutect2 = false$/call_mutect2 = true/' main.oxoflow > .var-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\ntumoronly\ttest\t\n' > config/somatic_pairs.tsv
+trap 'rm -f .var-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
 "$OXO" dry-run .var-test-tmp.oxoflow > /tmp/oxo-dryrun-var-$$.txt 2>&1
 for r in varlociraptor_call_germline_cohort_test varlociraptor_call_germline_cohort_test2 \
+         gatk_mutect2_tumor_only_tumoronly \
          varlociraptor_call_tumor_only_cohort_test \
          varlociraptor_call_tumor_only_cohort_test2; do
     grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-var-$$.txt \
@@ -231,7 +236,7 @@ trap - EXIT
 echo "  call_varlociraptor on (germline + tumor-only cohort fan-out); off by default"
 
 echo "==> somatic ascat/controlfreec/msisensor2 branch: dry-run with the three flags + filled pair sheet"
-# Upstream nf-core/sarek 3.10.0: BAM_VARIANT_CALLING_SOMATIC_ASCAT (ASCAT per
+# Upstream nf-core/sarek 3.12.0: BAM_VARIANT_CALLING_SOMATIC_ASCAT (ASCAT per
 # pair, R pipeline via alleleCounter), BAM_VARIANT_CALLING_SOMATIC_CONTROLFREEC
 # (MPILEUP_NORMAL + MPILEUP_TUMOR -> FREEC_SOMATIC -> ASSESS_SIGNIFICANCE +
 # FREEC2BED), and MSISENSOR2_MSI wired ONLY on the tumor-only path
@@ -266,5 +271,34 @@ rm -f .acf-test-tmp.oxoflow
 git checkout -q config/somatic_pairs.tsv
 trap - EXIT
 echo "  ascat_somatic + controlfreec chain paired; msisensor2 tumor-only; off by default"
+
+
+echo "==> force_call_alleles branch: dry-run with call_mutect2 + force_call_alleles (co-writer gating)"
+# Upstream nf-core/sarek 3.12.0 #2365 --force_call_alleles -> Mutect2
+# --alleles (modules/nf-core/gatk4/mutect2/main.nf `alleles ?
+# "--alleles ${alleles}"`). The port expresses it as complementary
+# when-gated co-writers of the two Mutect2 rules. This block asserts the
+# *_alleles instances schedule with the flag set (paired + tumor-only rows)
+# and never at default, with the base twins mutually excluded.
+sed 's@^call_mutect2 = false$@call_mutect2 = true@; s@^force_call_alleles = ""$@force_call_alleles = "fixtures/alleles.vcf.gz"@' main.oxoflow > .fca-test-tmp.oxoflow
+printf 'pair_id\texperiment\tcontrol\npair1\ttest\ttest2\ntumoronly\ttest\t\n' > config/somatic_pairs.tsv
+trap 'rm -f .fca-test-tmp.oxoflow; git checkout -q config/somatic_pairs.tsv' EXIT
+"$OXO" dry-run .fca-test-tmp.oxoflow > /tmp/oxo-dryrun-fca-$$.txt 2>&1
+for r in gatk_mutect2_paired_alleles_pair1 gatk_mutect2_tumor_only_alleles_tumoronly; do
+    grep -qE "^  [0-9]+\. ${r}[^ ]*  \[run" /tmp/oxo-dryrun-fca-$$.txt \
+        || { echo "force_call_alleles branch: ${r} not scheduled"; exit 1; }
+done
+# The base (no-alleles) twins must stay off while the flag is set.
+if grep -qE "^  [0-9]+\. gatk_mutect2_paired_pair1[^ ]*  \[run" /tmp/oxo-dryrun-fca-$$.txt; then
+    echo "force_call_alleles branch: base paired twin scheduled alongside the co-writer"; exit 1
+fi
+# Default config must have no alleles instance.
+if grep -qE "^  [0-9]+\. gatk_mutect2_[a-z_]*alleles[a-z_0-9]*[^ ]*  \[run" /tmp/oxo-dryrun-$$.txt; then
+    echo "force_call_alleles branch: alleles rule scheduled with default config"; exit 1
+fi
+rm -f .fca-test-tmp.oxoflow
+git checkout -q config/somatic_pairs.tsv
+trap - EXIT
+echo "  force_call_alleles on (both Mutect2 co-writers schedule); off by default"
 
 echo "PASS"

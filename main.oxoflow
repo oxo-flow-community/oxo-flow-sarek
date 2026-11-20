@@ -1,10 +1,10 @@
 # oxo-flow-sarek — WGS/WES germline variant calling
-# oxo-flow port of nf-core/sarek @ 3.10.0 (default-parameters main execution path).
+# oxo-flow port of nf-core/sarek @ 3.12.0 (default-parameters main execution path).
 #
 # Ported 2026-08-15, expanded 2026-08-26. See README.md fidelity table for the
 # exact upstream mapping and every deviation. Upstream default path reproduced here:
 #   FASTQC -> FASTP -> BWA_MEM -> GATK4_MARKDUPLICATES -> (mosdepth + samtools stats)
-#   -> GATK4_BASERECALIBRATOR -> GATK4_APPLYBQSR -> (index + mosdepth + samtools stats)
+#   -> GATK4_BASERECALIBRATOR -> GATK4_APPLYBQSR (streams + writes index) -> (mosdepth + samtools stats)
 #   -> GATK4_HAPLOTYPECALLER -> GATK4_CNNSCOREVARIANTS -> GATK4_FILTERVARIANTTRANCHES
 #   -> (bcftools stats + vcftools x3) -> ENSEMBLVEP_VEP -> MULTIQC
 #
@@ -24,7 +24,7 @@
 [workflow]
 name = "oxo-flow-sarek"
 version = "1.0.0"
-description = "WGS/WES germline and somatic variant calling — oxo-flow port of nf-core/sarek 3.10.0: QC, trimming/splitting, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, VEP annotation, MultiQC"
+description = "WGS/WES germline and somatic variant calling — oxo-flow port of nf-core/sarek 3.12.0: QC, trimming/splitting, BWA-MEM alignment, MarkDuplicates, BQSR, HaplotypeCaller, VEP annotation, MultiQC"
 author = "oxo-flow-community"
 # Tumor/normal pairs for the somatic callers (issue: somatic wave). The
 # shipped file is header-only: with call_mutect2=false (default) no somatic
@@ -34,7 +34,7 @@ author = "oxo-flow-community"
 pairs_file = "config/somatic_pairs.tsv"
 
 # Upstream nextflow.config params that drive the default path. Every value is
-# the upstream default (nf-core/sarek 3.10.0); `tools` is expressed as
+# the upstream default (nf-core/sarek 3.12.0); `tools` is expressed as
 # per-tool booleans below (upstream: params.tools = "haplotypecaller,vep").
 [config]
 out_dir = "results"
@@ -95,6 +95,10 @@ call_haplotypecaller = true
 annotate_vep = true
 skip_fastqc = false
 skip_mosdepth = false
+# upstream 3.12.0 #2351 --mosdepth_fast_mode (default on): --fast-mode rides
+# only the WGS leg (upstream conf/modules/modules.config MOSDEPTH ext.args:
+# !params.wes && params.mosdepth_fast_mode ? '--fast-mode' : '').
+mosdepth_fast_mode = true
 skip_samtools = false
 skip_bcftools = false
 skip_vcftools = false
@@ -144,6 +148,12 @@ call_deepvariant = false
 # pairs). PoN / gnomAD contamination panels are a separate resource step
 # (contamination_estimation uses the tumor-normal pileups instead).
 call_mutect2 = false
+# upstream 3.12.0 #2365 --force_call_alleles: bgzip'd VCF of alleles to
+# force-call; when set, the gatk_mutect2_*_alleles co-writer rules add
+# Mutect2 --alleles (upstream modules/nf-core/gatk4/mutect2/main.nf:
+# alleles ? "--alleles ${alleles}"). The .tbi is regenerated in-task, the
+# way upstream auto-generates it when --force_call_alleles_tbi is unset.
+force_call_alleles = ""
 call_strelka_somatic = false
 call_manta_somatic = false
 # MuSE tumor-normal somatic SNV (upstream BAM_VARIANT_CALLING_SOMATIC_MUSE:
@@ -162,7 +172,7 @@ msisensorpro_scan = "/data/references/GRCh38/Annotation/MSIsensorPro/Homo_sapien
 # the hybrid/wgs batch method switch.
 call_cnvkit = false
 # LoFreq SNV/indel (upstream BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ:
-# LOFREQ_CALLPARALLEL per sample with --call-indels). In upstream 3.10.0 the
+# LOFREQ_CALLPARALLEL per sample with --call-indels). In upstream 3.12.0 the
 # lofreq leg only exists on the tumor-only path (bam_variant_calling_tumor_
 # only_all — single-sample call-parallel over each samplesheet entry, no
 # paired mode); the port runs it over every cohort sample.
@@ -178,6 +188,7 @@ ascat_alleles = "/data/references/GRCh38/Annotation/ASCAT/G1000_alleles_hg38_chr
 ascat_loci = "/data/references/GRCh38/Annotation/ASCAT/G1000_loci_hg38_chr22.txt"
 ascat_purity = ""           # optional manual tumor purity (rho_manual); empty = estimate
 ascat_ploidy = ""           # optional manual ploidy (psi_manual); empty = estimate
+ascat_penalty = "70"        # upstream 3.11.0 #2328 ascat_penalty (default 70): ascat.aspcf penalty
 # Control-FREEC somatic CNV (upstream FREEC_SOMATIC +
 # CONTROLFREEC_ASSESSSIGNIFICANCE + CONTROLFREEC_FREEC2BED, fed by the paired
 # mpileup legs). WES/WGS switches derive from the wes flag (upstream
@@ -386,7 +397,7 @@ threads = 4
 memory = "4G"
 
 [rules.environment]
-singularity = "docker://quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0"
+singularity = "docker://community.wave.seqera.io/library/fastqc:0.13.0--b342db7b694c9af4"
 
 # ---------------------------------------------------------------------------
 # FASTP — nf-core/fastp module (trim/split; upstream runs when
@@ -888,12 +899,14 @@ output = [
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.regions.bed.gz",
   "{config.out_dir}/reports/mosdepth/{sample}/{sample}.md.regions.bed.gz.csi",
 ]
-description = "Mosdepth coverage on MarkDuplicates CRAM (ext.args '-n --fast-mode --by 500' for WGS)"
+description = "Mosdepth coverage on MarkDuplicates CRAM (upstream MOSDEPTH ext.args: '-n --by 500' + --fast-mode on the WGS leg, --fast-mode additionally gated on config.mosdepth_fast_mode, #2351)"
 when = "!config.skip_mosdepth"
 shell = """
 mkdir -p {config.out_dir}/reports/mosdepth/{sample}
 cp -L {config.fasta} ./reference.fasta
-mosdepth --threads 4 --fasta reference.fasta -n --fast-mode --by 500 {sample}.md {input[0]}
+MQA=""
+if [ "{config.wes}" != "true" ]; then MQA="-n --by 500"; [ "{config.mosdepth_fast_mode}" = "true" ] && MQA="$MQA --fast-mode"; fi
+mosdepth --threads 4 --fasta reference.fasta $MQA {sample}.md {input[0]}
 mv {sample}.md.mosdepth.global.dist.txt {sample}.md.mosdepth.summary.txt {sample}.md.regions.bed.gz {sample}.md.regions.bed.gz.csi {config.out_dir}/reports/mosdepth/{sample}/
 """
 
@@ -969,16 +982,24 @@ input = [
   "{config.out_dir}/preprocessing/markduplicates/{sample}/{sample}.md.{config.alignment_ext}",
   "{config.out_dir}/preprocessing/recal_table/{sample}/{sample}.recal.table",
 ]
-output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
-description = "Apply base quality score recalibration to the alignment file (nf-core GATK4_APPLYBQSR)"
+output = [
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
+]
+description = "Apply base quality score recalibration, streaming form (upstream 3.12.0 #2318 bam_applybqsr: GATK emits BAM on stdout, samtools view --write-index writes the alignment + index; CRAM pinned version=3.0 — env samtools 1.24 otherwise writes 3.1 the GATK 4.5 reader rejects, cf. the #4 merge fix)"
 when = "!config.scatter_gatk"
 shell = """
 mkdir -p {config.out_dir}/recalibrated/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
-gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output {sample}.recal.{config.alignment_ext} --reference reference.fasta --bqsr-recal-file {input[1]} --tmp-dir .
-mv {sample}.recal.{config.alignment_ext} {config.out_dir}/recalibrated/{sample}/
+if [ "{config.alignment_ext}" = "cram" ]; then
+  SVARG="-C --reference reference.fasta -O cram,version=3.0"
+else
+  SVARG="-b"
+fi
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" ApplyBQSR --input {input[0]} --output /dev/stdout --reference reference.fasta --bqsr-recal-file {input[1]} -OBI false --tmp-dir . | samtools view --write-index $SVARG -o {sample}.recal.{config.alignment_ext}##idx##{sample}.recal.{config.recal_index_ext} -
+mv {sample}.recal.{config.alignment_ext} {sample}.recal.{config.recal_index_ext} {config.out_dir}/recalibrated/{sample}/
 """
 
 [rules.resources]
@@ -989,29 +1010,16 @@ memory = "4G"
 conda = "envs/gatk4.yaml"
 
 # ---------------------------------------------------------------------------
-# CRAM_SAMPLEQC on the recalibrated CRAM: SAMTOOLS_INDEX, MOSDEPTH, SAMTOOLS_STATS
-# (ext.prefixes '{meta.id}.recal' / '{meta.id}.recal.cram')
+# CRAM_SAMPLEQC on the recalibrated CRAM: MOSDEPTH, SAMTOOLS_STATS
+# (ext.prefixes '{meta.id}.recal' / '{meta.id}.recal.cram'; the index now comes
+#  out of the gatk_applybqsr stream, samtools view --write-index, #2318)
 # ---------------------------------------------------------------------------
 [[rules]]
-name = "samtools_index_recal"
-input = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}"]
-output = ["{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}"]
-description = "Index recalibrated alignment file (nf-core SAMTOOLS_INDEX)"
-when = "!config.scatter_gatk"
-shell = "samtools index -@ 1 {input[0]}"
-
-[rules.resources]
-threads = 1
-memory = "1G"
-
-[rules.environment]
-conda = "envs/samtools.yaml"
-
-[[rules]]
 name = "mosdepth_recal"
-# the .crai input is the DAG edge to samtools_index_recal — mosdepth
-# requires an indexed alignment file, and without this edge it races
-# the indexer (live: 'alignment file must be indexed')
+# the .crai input is the DAG edge to gatk_applybqsr's samtools view
+# --write-index pass (#2318 streaming form) — mosdepth requires an
+# indexed alignment file, and without this edge it races the writer
+# (live: 'alignment file must be indexed')
 input = [
   "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.alignment_ext}",
   "{config.out_dir}/recalibrated/{sample}/{sample}.recal.{config.recal_index_ext}",
@@ -1027,7 +1035,9 @@ when = "!config.skip_mosdepth"
 shell = """
 mkdir -p {config.out_dir}/reports/mosdepth/{sample}
 cp -L {config.fasta} ./reference.fasta
-mosdepth --threads 4 --fasta reference.fasta -n --fast-mode --by 500 {sample}.recal {input[0]}
+MQA=""
+if [ "{config.wes}" != "true" ]; then MQA="-n --by 500"; [ "{config.mosdepth_fast_mode}" = "true" ] && MQA="$MQA --fast-mode"; fi
+mosdepth --threads 4 --fasta reference.fasta $MQA {sample}.recal {input[0]}
 mv {sample}.recal.mosdepth.global.dist.txt {sample}.recal.mosdepth.summary.txt {sample}.recal.regions.bed.gz {sample}.recal.regions.bed.gz.csi {config.out_dir}/reports/mosdepth/{sample}/
 """
 
@@ -1543,8 +1553,11 @@ input = [
   "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.normal.vcf",
   "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}.tiddit.tumor.vcf",
 ]
-output = ["{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit_sv_merge.vcf.gz"]
-description = "Merge normal+tumor TIDDIT VCFs (nf-core SVDB_MERGE; args2 '--output-type z'; upstream does not index here — the vcf.gz is pre-concat output, indexed by the later CONCAT_VCF step)"
+output = [
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit_sv_merge.vcf.gz",
+  "{config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/{experiment}_vs_{control}.tiddit_sv_merge.vcf.gz.tbi",
+]
+description = "Merge normal+tumor TIDDIT VCFs (nf-core SVDB_MERGE; args2 '--output-type z --write-index=tbi' as of upstream 3.12.0 #2393, which now indexes and publishes *{vcf.gz,vcf.gz.tbi} here)"
 when = "config.call_tiddit && wildcard.control != ''"
 log = "logs/svdb_merge_tiddit_{experiment}_vs_{control}.log"
 shell = """
@@ -1554,9 +1567,10 @@ svdb \\
   --vcf {input[0]} {input[1]} |\\
   bcftools view \\
     --output-type z \\
+    --write-index=tbi \\
     --threads {effective_threads} \\
     -o {experiment}_vs_{control}.tiddit_sv_merge.vcf.gz
-mv {experiment}_vs_{control}.tiddit_sv_merge.vcf.gz {config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/
+mv {experiment}_vs_{control}.tiddit_sv_merge.vcf.gz {experiment}_vs_{control}.tiddit_sv_merge.vcf.gz.tbi {config.out_dir}/variant_calling/tiddit/{experiment}_vs_{control}/
 """
 
 [rules.resources]
@@ -1622,7 +1636,7 @@ memory = "4G"
 singularity = "docker://quay.io/biocontainers/goleft:0.2.4--h9ee0642_1"
 
 # ===========================================================================
-# SOMATIC VARIANT CALLING (upstream nf-core/sarek 3.10.0 somatic path)
+# SOMATIC VARIANT CALLING (upstream nf-core/sarek 3.12.0 somatic path)
 # Pairs come from config/somatic_pairs.tsv (pair_id, experiment=tumor,
 # control=normal; control empty = tumor-only). All rules are pair-fanned
 # via [[pairs]] expansion ({experiment}_vs_{control}/{experiment}/{control}) and gated by
@@ -1650,7 +1664,7 @@ output = [
   "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.stats",
 ]
 description = "Somatic SNV/indel calling, tumor-normal pair (nf-core GATK4_MUTECT2; ext.args '--create-output-bam-index false --intervals-with-mate-pagination false --add-output-vcf-command-line false')"
-when = "config.call_mutect2 && wildcard.control != ''"
+when = "config.call_mutect2 && wildcard.control != '' && config.force_call_alleles == ''"
 log = "logs/gatk_mutect2_{experiment}_vs_{control}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}
@@ -1681,7 +1695,7 @@ output = [
   "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.stats",
 ]
 description = "Somatic SNV/indel calling, tumor-only (nf-core GATK4_MUTECT2 without -normal)"
-when = "config.call_mutect2 && wildcard.control == ''"
+when = "config.call_mutect2 && wildcard.control == '' && config.force_call_alleles == ''"
 log = "logs/gatk_mutect2_{experiment}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}
@@ -1689,6 +1703,82 @@ cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 cp -L {config.dict} ./reference.dict
 gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" Mutect2 -R reference.fasta -I {input[0]} -O {experiment}.mutect2.vcf.gz --stats {experiment}.mutect2.stats --tmp-dir .
+mv {experiment}.mutect2.vcf.gz {experiment}.mutect2.vcf.gz.tbi {experiment}.mutect2.stats {config.out_dir}/variant_calling/mutect2/{experiment}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# GATK4 MUTECT2 paired + force-call alleles (upstream 3.12.0 #2365
+# --force_call_alleles -> Mutect2 --alleles, modules/nf-core/gatk4/mutect2/
+# main.nf `alleles ? "--alleles ${alleles}"`). Complementary when-gated
+# co-writer of gatk_mutect2_paired on config.force_call_alleles; the .tbi is
+# regenerated in-task with htslib tabix, the way upstream auto-generates the
+# index when --force_call_alleles_tbi is not provided.
+[[rules]]
+name = "gatk_mutect2_paired_alleles"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.out_dir}/recalibrated/{control}/{control}.recal.{config.alignment_ext}",
+  "{config.force_call_alleles}",
+]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.baf.tsv",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/{experiment}_vs_{control}.mutect2.stats",
+]
+description = "Somatic SNV/indel calling with forced alleles, tumor-normal pair (nf-core GATK4_MUTECT2 + --alleles from config.force_call_alleles, upstream #2365)"
+when = "config.call_mutect2 && wildcard.control != '' && config.force_call_alleles != ''"
+log = "logs/gatk_mutect2_{experiment}_vs_{control}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {input[2]} ./alleles.vcf.gz
+tabix -p vcf -f alleles.vcf.gz
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" Mutect2 -R reference.fasta -I {input[0]} -I {input[1]} -normal {control} -O {experiment}_vs_{control}.mutect2.vcf.gz --f1r2-tar-gz {experiment}_vs_{control}.mutect2.baf.tar.gz --stats {experiment}_vs_{control}.mutect2.stats --alleles alleles.vcf.gz --tmp-dir .
+ls {experiment}_vs_{control}.mutect2.baf.tar.gz >/dev/null 2>&1 && mv {experiment}_vs_{control}.mutect2.baf.tar.gz {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/ || true
+mv {experiment}_vs_{control}.mutect2.vcf.gz {experiment}_vs_{control}.mutect2.vcf.gz.tbi {experiment}_vs_{control}.mutect2.stats {config.out_dir}/variant_calling/mutect2/{experiment}_vs_{control}/
+"""
+
+[rules.resources]
+threads = 2
+memory = "12G"
+
+[rules.environment]
+conda = "envs/gatk4.yaml"
+
+# GATK4 MUTECT2 tumor-only + force-call alleles (same #2365 co-writer shape
+# for the tumor-only path; upstream bam_variant_calling_tumor_only_all wires
+# the identical force_call_alleles channel).
+[[rules]]
+name = "gatk_mutect2_tumor_only_alleles"
+input = [
+  "{config.out_dir}/recalibrated/{experiment}/{experiment}.recal.{config.alignment_ext}",
+  "{config.force_call_alleles}",
+]
+output = [
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.vcf.gz.tbi",
+  "{config.out_dir}/variant_calling/mutect2/{experiment}/{experiment}.mutect2.stats",
+]
+description = "Somatic SNV/indel calling with forced alleles, tumor-only (nf-core GATK4_MUTECT2 + --alleles from config.force_call_alleles, upstream #2365)"
+when = "config.call_mutect2 && wildcard.control == '' && config.force_call_alleles != ''"
+log = "logs/gatk_mutect2_{experiment}.log"
+shell = """
+mkdir -p {config.out_dir}/variant_calling/mutect2/{experiment}
+cp -L {config.fasta} ./reference.fasta
+cp -L {config.fasta_fai} ./reference.fasta.fai
+cp -L {config.dict} ./reference.dict
+cp -L {input[1]} ./alleles.vcf.gz
+tabix -p vcf -f alleles.vcf.gz
+gatk --java-options "-Xmx{effective_memory_mb}m -XX:-UsePerfData" Mutect2 -R reference.fasta -I {input[0]} -O {experiment}.mutect2.vcf.gz --stats {experiment}.mutect2.stats --alleles alleles.vcf.gz --tmp-dir .
 mv {experiment}.mutect2.vcf.gz {experiment}.mutect2.vcf.gz.tbi {experiment}.mutect2.stats {config.out_dir}/variant_calling/mutect2/{experiment}/
 """
 
@@ -1942,7 +2032,7 @@ memory = "72G"
 conda = "envs/muse.yaml"
 
 # LoFreq SNV/indel calling (upstream BAM_VARIANT_CALLING_TUMOR_ONLY_LOFREQ —
-# in upstream 3.10.0 the lofreq leg exists only on the tumor-only path:
+# in upstream 3.12.0 the lofreq leg exists only on the tumor-only path:
 # LOFREQ_CALLPARALLEL per sample, ext.args "--call-indels", prefix
 # "${meta.id}.lofreq", published to variant_calling/lofreq/{meta.id}/; there
 # is no paired lofreq leg in bam_variant_calling_somatic_all). LOFREQ_
@@ -2024,7 +2114,7 @@ mkdir -p {config.out_dir}/variant_calling/varlociraptor/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 varlociraptor estimate alignment-properties reference.fasta --bams {input[0]} > {sample}.alignment-properties.json
-varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.haplotypecaller.preprocess.bcf
+varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.haplotypecaller.preprocess.bcf --atomic-candidate-variants
 varlociraptor call variants --output {sample}.haplotypecaller.call.bcf generic --scenario {input[3]} --obs normal={input[2]}
 bcftools sort --output {sample}.haplotypecaller.sorted.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.haplotypecaller.call.bcf
 varlociraptor filter-calls control-fdr --mode local-smart {sample}.haplotypecaller.sorted.vcf.gz --events germline --fdr {config.varlociraptor_fdr} > {sample}.haplotypecaller.filtered.bcf
@@ -2062,7 +2152,7 @@ mkdir -p {config.out_dir}/variant_calling/varlociraptor/{sample}
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 varlociraptor estimate alignment-properties reference.fasta --bams {input[0]} > {sample}.mutect2.alignment-properties.json
-varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.mutect2.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.mutect2.preprocess.bcf
+varlociraptor preprocess variants reference.fasta --alignment-properties {sample}.mutect2.alignment-properties.json --bam {input[0]} --candidates {input[2]} --output {sample}.mutect2.preprocess.bcf --atomic-candidate-variants
 varlociraptor call variants --output {sample}.mutect2.call.bcf generic --scenario {input[3]} --obs tumor={input[2]}
 bcftools sort --output {sample}.mutect2.sorted.vcf.gz --temp-dir . --output-type z --write-index=tbi {sample}.mutect2.call.bcf
 varlociraptor filter-calls control-fdr --mode local-smart {sample}.mutect2.sorted.vcf.gz --events somatic_tumor_high somatic_tumor_low --fdr {config.varlociraptor_fdr} > {sample}.mutect2.filtered.bcf
@@ -2078,17 +2168,47 @@ memory = "6G"
 [rules.environment]
 conda = "envs/varlociraptor.yaml"
 
+# Staging companion of msisensorpro_scan: when the user declares the scan
+# list ready (msisensorpro_scan_ready = true) this rule co-writes the same
+# canonical out_dir paths from config.msisensorpro_scan, so msisensorpro_msi
+# keeps its produced-path ordering edge in either mode (with only a
+# when-gated-off producer claiming the path, oxo-flow prunes the consumer as
+# unreachable; a complementary when-gated co-writer keeps the edge live).
+# Plain cp/touch — no tools env needed, inherits the system environment.
+[[rules]]
+name = "msis_scan_stage"
+input = ["{config.msisensorpro_scan}"]
+output = [
+  "{config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list",
+  "{config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list.done",
+]
+description = "Stage a user-supplied MSIsensor-pro scan list into the run layout when msisensorpro_scan_ready = true (co-writer of the canonical scan-list path with msisensorpro_scan; complementary when-gates)"
+when = "config.call_msisensorpro && config.msisensorpro_scan_ready"
+log = "logs/msis_scan_stage.log"
+shell = """
+mkdir -p {config.out_dir}/reference/msisensorpro
+cp -L {input[0]} {config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list
+touch {config.out_dir}/reference/msisensorpro/{config.genome}.msisensor_scan.list.done
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
 # MSIsensor-pro MSI scoring (upstream prepare_genome MSISENSORPRO_SCAN +
 # bam_variant_calling_somatic_all MSISENSORPRO_MSISOMATIC, nf-core/sarek
-# 3.10.0). MSISENSORPRO_SCAN runs `msisensor-pro scan` on the fasta once per
-# run to build the msi-scan list (skipped when the user supplies one via
-# msisensorpro_scan_ready); MSISENSORPRO_MSISOMATIC runs `msisensor-pro msi`
+# 3.12.0). MSISENSORPRO_SCAN runs `msisensor-pro scan` on the fasta once per
+# run to build the msi-scan list (staged from config.msisensorpro_scan by
+# msis_scan_stage when the user supplies one via msisensorpro_scan_ready);
+# MSISENSORPRO_MSISOMATIC runs `msisensor-pro msi`
 # per tumor-normal pair: -d the scan list, -n the normal BAM, -t the tumor
 # BAM, -g the fasta (the port always passes it — upstream passes it whenever
-# fasta exists), -b the thread count. The report prefix is {pair} (files:
-# report, _dis, _germline, _somatic); published upstream to
-# variant_calling/msisensorpro/{pair}/. MultiQC has no msisensorpro module
-# (sompy is a different tool), so nothing feeds multiqc.
+# fasta exists), -b the thread count. The report prefix is {pair}; as of
+# upstream 3.12.0 #2370 the per-site outputs are report, _dis, _all (all
+# evaluated microsatellites) and _unstable (somatic MSI sites; header-only
+# when none) — the 3.10.0 _germline/_somatic pair is retired. Published
+# upstream to variant_calling/msisensorpro/{pair}/. MultiQC has no
+# msisensorpro module (sompy is a different tool), so nothing feeds multiqc.
 [[rules]]
 name = "msisensorpro_scan"
 input = ["{config.fasta}"]
@@ -2124,8 +2244,8 @@ input = [
 output = [
   "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}",
   "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_dis",
-  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_germline",
-  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_somatic",
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_all",
+  "{config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_unstable",
 ]
 description = "MSIsensor-pro msi scoring on the tumor-normal pair (nf-core MSISENSORPRO_MSISOMATIC; -d scan list, -n normal, -t tumor)"
 when = "config.call_msisensorpro && wildcard.control != ''"
@@ -2136,8 +2256,8 @@ cp -L {input[2]} ./msi_scan.list
 cp -L {config.fasta} ./reference.fasta
 cp -L {config.fasta_fai} ./reference.fasta.fai
 msisensor-pro msi -d msi_scan.list -n {input[1]} -t {input[0]} -g reference.fasta -o {experiment}_vs_{control} -b {effective_threads}
-mv {experiment}_vs_{control} {experiment}_vs_{control}_dis {experiment}_vs_{control}_germline {experiment}_vs_{control}_somatic {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/
-touch {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_somatic.done
+mv {experiment}_vs_{control} {experiment}_vs_{control}_dis {experiment}_vs_{control}_all {experiment}_vs_{control}_unstable {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/
+touch {config.out_dir}/variant_calling/msisensorpro/{experiment}_vs_{control}/{experiment}_vs_{control}_unstable.done
 """
 
 [rules.resources]
@@ -2277,7 +2397,7 @@ when = "config.call_ascat && wildcard.control != ''"
 log = "logs/ascat_somatic_{experiment}_vs_{control}.log"
 shell = """
 mkdir -p {config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}
-Rscript assets/ascat_run.R {experiment}_vs_{control} {input[0]} {input[1]} {config.ascat_alleles} {config.ascat_loci} {config.fasta} {config.sex} "c(1:22, 'X')" $([ -n "{config.ascat_purity}" ] && echo -E {config.ascat_purity} || echo -E NULL) $([ -n "{config.ascat_ploidy}" ] && echo -E {config.ascat_ploidy} || echo -E NULL) {effective_threads}
+Rscript assets/ascat_run.R {experiment}_vs_{control} {input[0]} {input[1]} {config.ascat_alleles} {config.ascat_loci} {config.fasta} {config.sex} "c(1:22, 'X')" $([ -n "{config.ascat_purity}" ] && echo -E {config.ascat_purity} || echo -E NULL) $([ -n "{config.ascat_ploidy}" ] && echo -E {config.ascat_ploidy} || echo -E NULL) {effective_threads} $([ -n "{config.ascat_penalty}" ] && echo {config.ascat_penalty} || echo NULL)
 mv {experiment}_vs_{control}.segments.txt {experiment}_vs_{control}.cnvs.txt {experiment}_vs_{control}.purityploidy.txt {experiment}_vs_{control}.metrics.txt {config.out_dir}/variant_calling/ascat/{experiment}_vs_{control}/
 """
 
@@ -3370,7 +3490,7 @@ memory = "36G"
 [rules.environment]
 conda = "envs/vep.yaml"
 
-# LoFreq QC + VEP fan-out: upstream 3.10.0 lists lofreq among the small
+# LoFreq QC + VEP fan-out: upstream 3.12.0 lists lofreq among the small
 # variantcallers eligible for VCF_QC_BCFTOOLS_VCFTOOLS and annotation (the
 # cohort fan-out is a single-sample call, so the family mirrors the germline
 # callers; there is no lofreq filtering step in the port, so the VCF is
@@ -4825,7 +4945,7 @@ shell = """
 mkdir -p {config.out_dir}
 cp -L assets/nf-core-sarek_logo_light.png {config.out_dir}/
 cd {config.out_dir}
-multiqc --force --config ../assets/multiqc_config.yml .
+multiqc --force --config ../assets/multiqc_config.yml --cl-config "custom_logo: \"$PWD/nf-core-sarek_logo_light.png\"" .
 """
 
 [rules.resources]
