@@ -6,7 +6,7 @@
 # braces (oxo-flow substitutes {token} patterns inside shell strings):
 #   Rscript ascat_run.R <prefix> <tumor_cram> <normal_cram> <alleles> <loci>
 #                       <fasta> <gender> <chrom_names> [purity] [ploidy]
-#                       [threads]
+#                       [threads] [penalty]
 # gender: "XX"/"XY"/"NULL" (literal NULL string when sex not set)
 # chrom_names: R vector literal, e.g. c(1:22, 'X'); "NULL" when unset
 # purity/ploidy: numeric, or NULL when unset (ascat_purity/ascat_ploidy)
@@ -20,7 +20,7 @@ options(bitmapType = "cairo")
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 8) {
   stop(paste("usage: ascat_run.R <prefix> <tumor> <normal> <alleles> <loci>",
-             "<fasta> <gender> <chrom_names> [purity] [ploidy] [threads]"))
+             "<fasta> <gender> <chrom_names> [purity] [ploidy] [threads] [penalty]"))
 }
 prefix      <- args[1]
 tumourseq   <- args[2]
@@ -33,6 +33,10 @@ chrom_names <- args[8]
 purity      <- if (length(args) >= 9 && args[9] != "NULL") as.numeric(args[9]) else NULL
 ploidy      <- if (length(args) >= 10 && args[10] != "NULL") as.numeric(args[10]) else NULL
 nthreads    <- if (length(args) >= 11) as.integer(args[11]) else 1
+# penalty: ascat.aspcf penalty (upstream 3.11.0 #2328 params.ascat_penalty,
+# default 70); NULL falls back to the ascat::aspcf built-in default, as the
+# nf-core ascat module does when args.penalty is unset.
+penalty     <- if (length(args) >= 12 && args[12] != "NULL") as.numeric(args[12]) else NULL
 
 # --- allele/loci prefix resolution (mirrors upstream dir/file dual case) ---
 resolve_prefix <- function(x, what) {
@@ -92,7 +96,11 @@ ascat.bc <- ascat.loadData(
 )
 ascat.plotRawData(ascat.bc, img.prefix = paste0(prefix, ".before_correction."))
 
-ascat.bc <- ascat.aspcf(ascat.bc, seed = 42)
+if (is.null(penalty)) {
+  ascat.bc <- ascat.aspcf(ascat.bc, seed = 42)
+} else {
+  ascat.bc <- ascat.aspcf(ascat.bc, penalty = penalty, seed = 42)
+}
 ascat.plotSegmentedData(ascat.bc)
 
 # --- runAscat: rho/psi manual cases mirror upstream 4-way branch ---
